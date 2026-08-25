@@ -1,0 +1,10 @@
+CREATE TABLE IF NOT EXISTS inventory_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),available_raw INTEGER NOT NULL CHECK(available_raw>=0),activated_at_unix_ms INTEGER);
+INSERT OR IGNORE INTO inventory_state VALUES(1,0,NULL);
+CREATE TABLE IF NOT EXISTS client_positions(client_id TEXT PRIMARY KEY,available_raw INTEGER NOT NULL CHECK(available_raw>=0),locked_raw INTEGER NOT NULL CHECK(locked_raw>=0),updated_at_unix_ms INTEGER NOT NULL);
+INSERT OR IGNORE INTO client_positions VALUES('alice',0,0,0);
+INSERT OR IGNORE INTO client_positions VALUES('bob',0,0,0);
+INSERT OR IGNORE INTO client_positions VALUES('carol',0,0,0);
+CREATE TABLE IF NOT EXISTS retail_orders(operation_id TEXT PRIMARY KEY,client_id TEXT NOT NULL,order_type TEXT NOT NULL CHECK(order_type IN('purchase','sale','redemption')),quantity_raw INTEGER NOT NULL CHECK(quantity_raw>0),fiat_currency TEXT NOT NULL,fiat_amount_minor INTEGER NOT NULL CHECK(fiat_amount_minor>0),status TEXT NOT NULL,issuer_operation_id TEXT,blockchain_transaction_hash TEXT,last_error TEXT,created_at_unix_ms INTEGER NOT NULL,updated_at_unix_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ledger_entries(entry_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL,account_type TEXT NOT NULL,account_id TEXT NOT NULL,direction TEXT NOT NULL CHECK(direction IN('debit','credit','lock','release')),quantity_raw INTEGER NOT NULL CHECK(quantity_raw>0),created_at_unix_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS service_records(record_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL,client_id TEXT NOT NULL,service_type TEXT NOT NULL,order_type TEXT NOT NULL,asset_symbol TEXT NOT NULL,contract_address TEXT NOT NULL,chain_id INTEGER NOT NULL,quantity_raw INTEGER NOT NULL,fiat_currency TEXT NOT NULL,gross_fiat_minor INTEGER NOT NULL,fee_minor INTEGER NOT NULL,status TEXT NOT NULL,source_account TEXT,destination_account TEXT,blockchain_transaction_hash TEXT,decision_actor TEXT NOT NULL,created_at_unix_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_service_records_client_time ON service_records(client_id,created_at_unix_ms DESC);

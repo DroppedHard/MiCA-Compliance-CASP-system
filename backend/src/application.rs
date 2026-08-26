@@ -303,6 +303,7 @@ mod tests {
                 corporate_raw: b.0.to_string(),
                 hot_raw: b.1.to_string(),
                 cold_raw: b.2.to_string(),
+                evidence_block: Some(1),
             })
         }
     }

@@ -4,8 +4,9 @@ use casp_backend::{
     config::Config,
     infrastructure::{
         AlloyWalletGateway, HttpBankGateway, HttpIssuerGateway, SqliteBootstrapStore,
-        SqliteRetailStore,
+        SqliteReconciliationStore, SqliteRetailStore,
     },
+    reconciliation::ReconciliationService,
     retail_application::RetailService,
 };
 use std::sync::Arc;
@@ -35,26 +36,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(SqliteBootstrapStore::open(&c.database_path)?),
         issuer.clone(),
         Arc::new(HttpBankGateway::new(&c.mock_bank_url)),
+        wallet.clone(),
+        c.corporate_address,
+        c.hot_address,
+        c.cold_address,
+    ));
+    let retail_store = Arc::new(SqliteRetailStore::open(&c.database_path)?);
+    let reconciliation = Arc::new(ReconciliationService::new(
+        Arc::new(SqliteReconciliationStore::open(&c.database_path)?),
+        retail_store.clone(),
         wallet,
         c.corporate_address,
         c.hot_address,
         c.cold_address,
     ));
     let retail = Arc::new(RetailService::new(
-        Arc::new(SqliteRetailStore::open(&c.database_path)?),
+        retail_store,
         issuer,
         c.hot_address,
         c.token_address.to_checksum(None),
         c.chain_id,
+        reconciliation.clone(),
     ));
     // A CASP cannot allocate customer entitlements before it owns the matching
     // rUSD pool. Resume the idempotent 10,000 rUSD bootstrap on every startup;
     // completed boundaries are read from SQLite and are never executed twice.
     let bootstrap = service.execute().await?;
     retail.activate_bootstrap_inventory(PURCHASE_TOKEN_RAW)?;
+    reconciliation.check().await?;
+    tokio::spawn(
+        reconciliation
+            .as_ref()
+            .clone()
+            .run(std::time::Duration::from_secs(300)),
+    );
     info!(operation_id=%bootstrap.operation_id,status=?bootstrap.status,"CASP initial inventory is ready");
     let listener = TcpListener::bind(c.http_address).await?;
     info!(address=%c.http_address,"CASP HTTP server started");
-    axum::serve(listener, api::router(service, retail)).await?;
+    axum::serve(listener, api::router(service, retail, reconciliation)).await?;
     Ok(())
 }

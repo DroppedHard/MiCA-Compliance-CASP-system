@@ -37,4 +37,5 @@ pub struct WalletBalances {
     pub corporate_raw: String,
     pub hot_raw: String,
     pub cold_raw: String,
+    pub evidence_block: Option<u64>,
 }

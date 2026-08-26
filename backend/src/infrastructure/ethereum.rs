@@ -81,6 +81,7 @@ impl WalletGateway for AlloyWalletGateway {
             corporate_raw: self.balance(corporate).await?.to_string(),
             hot_raw: self.balance(hot).await?.to_string(),
             cold_raw: self.balance(cold).await?.to_string(),
+            evidence_block: Some(self.provider.get_block_number().await.map_err(wallet)?),
         })
     }
 }

@@ -1,6 +1,7 @@
 use crate::{
     application::{BootstrapError, BootstrapService},
     domain::{BootstrapOperation, WalletBalances},
+    reconciliation::{ReconciliationService, ReconciliationSnapshot},
     retail::{ClientAccount, RetailOrder, ServiceRecord},
     retail_application::{RetailError, RetailService},
 };
@@ -17,8 +18,13 @@ use std::sync::Arc;
 struct AppState {
     service: Arc<BootstrapService>,
     retail: Arc<RetailService>,
+    reconciliation: Arc<ReconciliationService>,
 }
-pub fn router(service: Arc<BootstrapService>, retail: Arc<RetailService>) -> Router {
+pub fn router(
+    service: Arc<BootstrapService>,
+    retail: Arc<RetailService>,
+    reconciliation: Arc<ReconciliationService>,
+) -> Router {
     Router::new()
         .route("/health", get(health))
         .route(
@@ -26,13 +32,27 @@ pub fn router(service: Arc<BootstrapService>, retail: Arc<RetailService>) -> Rou
             post(execute).get(operation),
         )
         .route("/api/v1/admin/wallets", get(wallets))
+        .route("/api/v1/admin/reconciliation", get(get_reconciliation))
         .route("/api/v1/clients", get(accounts))
         .route("/api/v1/clients/{client_id}/account", get(account))
         .route("/api/v1/clients/{client_id}/records", get(records))
         .route("/api/v1/clients/{client_id}/purchases", post(purchase))
         .route("/api/v1/clients/{client_id}/sales", post(sale))
         .route("/api/v1/clients/{client_id}/redemptions", post(redemption))
-        .with_state(AppState { service, retail })
+        .with_state(AppState {
+            service,
+            retail,
+            reconciliation,
+        })
+}
+async fn get_reconciliation(
+    State(state): State<AppState>,
+) -> Result<Json<ReconciliationSnapshot>, ApiError> {
+    state
+        .reconciliation
+        .current()
+        .map(Json)
+        .map_err(|error| ApiError(BootstrapError::Reconciliation(error.to_string())))
 }
 async fn health() -> Json<Health> {
     Json(Health { status: "ok" })
@@ -88,6 +108,7 @@ async fn purchase(
 ) -> Result<Json<RetailOrder>, RetailApiError> {
     s.retail
         .purchase(&client, &body.operation_id, body.amount_usd_minor)
+        .await
         .map(Json)
         .map_err(RetailApiError)
 }
@@ -98,6 +119,7 @@ async fn sale(
 ) -> Result<Json<RetailOrder>, RetailApiError> {
     s.retail
         .sale(&client, &body.operation_id, body.token_amount_raw)
+        .await
         .map(Json)
         .map_err(RetailApiError)
 }
@@ -147,6 +169,7 @@ impl IntoResponse for RetailApiError {
             | RetailError::InsufficientInventory
             | RetailError::InsufficientBalance => StatusCode::CONFLICT,
             RetailError::Issuer(_) => StatusCode::BAD_GATEWAY,
+            RetailError::Reconciliation(_) => StatusCode::SERVICE_UNAVAILABLE,
             RetailError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (

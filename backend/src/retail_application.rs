@@ -1,3 +1,4 @@
+use crate::reconciliation::ReconciliationService;
 use crate::retail::{ClientAccount, RetailOrder, ServiceRecord};
 use alloy::primitives::Address;
 use async_trait::async_trait;
@@ -58,6 +59,7 @@ pub struct RetailService {
     hot: Address,
     contract: String,
     chain: u64,
+    reconciliation: Arc<ReconciliationService>,
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 impl RetailService {
@@ -67,6 +69,7 @@ impl RetailService {
         hot: Address,
         contract: String,
         chain: u64,
+        reconciliation: Arc<ReconciliationService>,
     ) -> Self {
         Self {
             store,
@@ -74,6 +77,7 @@ impl RetailService {
             hot,
             contract,
             chain,
+            reconciliation,
             lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -91,7 +95,7 @@ impl RetailService {
         validate_client(client)?;
         self.store.records(client)
     }
-    pub fn purchase(
+    pub async fn purchase(
         &self,
         client: &str,
         id: &str,
@@ -104,10 +108,21 @@ impl RetailService {
                 "amountUsdMinor must be positive".into(),
             ));
         }
-        self.store
-            .purchase(id, client, amount_minor, &self.contract, self.chain)
+        let _guard = self.lock.lock().await;
+        self.reconciliation
+            .require_customer_purchase()
+            .await
+            .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
+        let order = self
+            .store
+            .purchase(id, client, amount_minor, &self.contract, self.chain)?;
+        self.reconciliation
+            .check()
+            .await
+            .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
+        Ok(order)
     }
-    pub fn sale(
+    pub async fn sale(
         &self,
         client: &str,
         id: &str,
@@ -120,8 +135,22 @@ impl RetailService {
                 "tokenAmountRaw must be positive and represent whole USD cents".into(),
             ));
         }
-        self.store
-            .sale(id, client, amount_raw, &self.contract, self.chain)
+        let _guard = self.lock.lock().await;
+        // A sale only moves an entitlement back to unallocated inventory. It
+        // does not create a new customer liability, so it remains available
+        // during a mismatch while still producing fresh before/after evidence.
+        self.reconciliation
+            .check()
+            .await
+            .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
+        let order = self
+            .store
+            .sale(id, client, amount_raw, &self.contract, self.chain)?;
+        self.reconciliation
+            .check()
+            .await
+            .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
+        Ok(order)
     }
     pub async fn redeem(
         &self,
@@ -137,6 +166,12 @@ impl RetailService {
             ));
         }
         let _guard = self.lock.lock().await;
+        // Redemption reduces the customer's entitlement together with the
+        // on-chain custody pool, so a mismatch does not remove the exit path.
+        self.reconciliation
+            .check()
+            .await
+            .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
         let order = self.store.begin_redemption(
             id,
             client,
@@ -160,9 +195,16 @@ impl RetailService {
         }
         .await;
         match result {
-            Ok(value) => self
-                .store
-                .complete_redemption(&order.operation_id, value.transaction_hash.as_deref()),
+            Ok(value) => {
+                let completed = self
+                    .store
+                    .complete_redemption(&order.operation_id, value.transaction_hash.as_deref())?;
+                self.reconciliation
+                    .check()
+                    .await
+                    .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
+                Ok(completed)
+            }
             Err(e) => {
                 let _ = self
                     .store
@@ -186,6 +228,8 @@ pub enum RetailError {
     Storage(String),
     #[error("issuer redemption failed: {0}")]
     Issuer(String),
+    #[error("CASP custody reconciliation failed: {0}")]
+    Reconciliation(String),
 }
 fn validate_id(id: &str) -> Result<(), RetailError> {
     if id.trim().is_empty() || id.len() > 128 {
@@ -207,7 +251,12 @@ fn validate_client(client: &str) -> Result<(), RetailError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::SqliteRetailStore;
+    use crate::{
+        application::{BootstrapError, WalletGateway},
+        domain::WalletBalances,
+        infrastructure::{SqliteReconciliationStore, SqliteRetailStore},
+        reconciliation::ReconciliationService,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Issuer(AtomicUsize);
@@ -224,6 +273,33 @@ mod tests {
             })
         }
     }
+    struct Wallet {
+        hot: u64,
+        cold: u64,
+    }
+    #[async_trait]
+    impl WalletGateway for Wallet {
+        async fn ensure_balance(
+            &self,
+            _: Address,
+            _: u64,
+        ) -> Result<Option<String>, BootstrapError> {
+            unreachable!()
+        }
+        async fn balances(
+            &self,
+            _: Address,
+            _: Address,
+            _: Address,
+        ) -> Result<WalletBalances, BootstrapError> {
+            Ok(WalletBalances {
+                corporate_raw: "0".into(),
+                hot_raw: self.hot.to_string(),
+                cold_raw: self.cold.to_string(),
+                evidence_block: Some(1),
+            })
+        }
+    }
 
     #[tokio::test]
     async fn completed_redemption_does_not_call_issuer_twice() {
@@ -234,11 +310,22 @@ mod tests {
             .unwrap();
         let issuer = Arc::new(Issuer(AtomicUsize::new(0)));
         let service = RetailService::new(
-            store,
+            store.clone(),
             issuer.clone(),
             Address::with_last_byte(2),
             "0x1".into(),
             31337,
+            Arc::new(ReconciliationService::new(
+                Arc::new(SqliteReconciliationStore::open(":memory:").unwrap()),
+                store,
+                Arc::new(Wallet {
+                    hot: 2_000_000,
+                    cold: 8_000_000,
+                }),
+                Address::with_last_byte(1),
+                Address::with_last_byte(2),
+                Address::with_last_byte(3),
+            )),
         );
         service
             .redeem("alice", "redemption", 500_000)
@@ -249,5 +336,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(issuer.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn purchase_is_rejected_before_ledger_change_when_custody_is_short() {
+        let store = Arc::new(SqliteRetailStore::open(":memory:").unwrap());
+        store.activate_inventory(10_000_000).unwrap();
+        let service = RetailService::new(
+            store.clone(),
+            Arc::new(Issuer(AtomicUsize::new(0))),
+            Address::with_last_byte(2),
+            "0x1".into(),
+            31337,
+            Arc::new(ReconciliationService::new(
+                Arc::new(SqliteReconciliationStore::open(":memory:").unwrap()),
+                store.clone(),
+                Arc::new(Wallet {
+                    hot: 2_000_000,
+                    cold: 7_999_999,
+                }),
+                Address::with_last_byte(1),
+                Address::with_last_byte(2),
+                Address::with_last_byte(3),
+            )),
+        );
+
+        assert!(matches!(
+            service.purchase("alice", "purchase", 100).await,
+            Err(RetailError::Reconciliation(_))
+        ));
+        assert_eq!(store.account("alice").unwrap().available_raw, "0");
+    }
+
+    #[tokio::test]
+    async fn concurrent_purchases_are_serialized_and_remain_reconciled() {
+        let store = Arc::new(SqliteRetailStore::open(":memory:").unwrap());
+        store.activate_inventory(10_000_000).unwrap();
+        let reconciliation = Arc::new(ReconciliationService::new(
+            Arc::new(SqliteReconciliationStore::open(":memory:").unwrap()),
+            store.clone(),
+            Arc::new(Wallet {
+                hot: 2_000_000,
+                cold: 8_000_000,
+            }),
+            Address::with_last_byte(1),
+            Address::with_last_byte(2),
+            Address::with_last_byte(3),
+        ));
+        let service = Arc::new(RetailService::new(
+            store.clone(),
+            Arc::new(Issuer(AtomicUsize::new(0))),
+            Address::with_last_byte(2),
+            "0x1".into(),
+            31337,
+            reconciliation.clone(),
+        ));
+        let first = service.clone();
+        let second = service.clone();
+        let (alice, bob) = tokio::join!(
+            async move { first.purchase("alice", "purchase-a", 100).await },
+            async move { second.purchase("bob", "purchase-b", 100).await }
+        );
+        alice.unwrap();
+        bob.unwrap();
+
+        assert_eq!(store.account("alice").unwrap().available_raw, "1000000");
+        assert_eq!(store.account("bob").unwrap().available_raw, "1000000");
+        assert_eq!(
+            reconciliation.current().unwrap().status,
+            crate::reconciliation::ReconciliationStatus::Balanced
+        );
     }
 }

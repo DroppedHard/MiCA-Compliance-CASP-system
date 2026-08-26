@@ -1,5 +1,17 @@
 # CASP backend
 
+## Custody reconciliation
+
+The backend persists custody evidence under policy `casp-custody-reconciliation-v1`. It compares on-chain hot and cold wallet balances with the sum of customer available positions, customer locked positions and unallocated inventory. The corporate wallet is reported separately and never counted as coverage for client entitlements.
+
+Reconciliation runs immediately after the startup bootstrap, every five minutes, and before and after current purchase, sale and redemption operations. New customer purchases fail closed when evidence is unavailable or totals differ. Sales and redemptions remain available because they do not create a new customer entitlement. Allocation drift away from the demo 20/80 target produces `warning` without claiming a custody shortfall.
+
+Read the latest persisted snapshot:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:3200/api/v1/admin/reconciliation
+```
+
 Rust service representing the CASP boundary. It has its own SQLite database and never accesses the issuer database directly.
 
 ## First implemented scenario

@@ -6,6 +6,7 @@ import { rawToRusd } from "./amounts"
 const names:Record<string,string>={alice:"Alicja",bob:"Bartosz",carol:"Karolina"}
 
 export function AdminDashboard(){
+  const reportRange=lastSevenDays()
   const reconciliation=useQuery({queryKey:["admin","reconciliation"],queryFn:api.reconciliation,refetchInterval:10_000})
   const wallets=useQuery({queryKey:["admin","wallets"],queryFn:api.wallets,refetchInterval:10_000})
   const accounts=useQuery({queryKey:["admin","accounts"],queryFn:api.accounts,refetchInterval:10_000})
@@ -15,9 +16,10 @@ export function AdminDashboard(){
     return [...new Map(clientRecords.flat().map(record=>[record.recordId,record])).values()].sort((left,right)=>right.createdAtUnixMs-left.createdAtUnixMs)
   },refetchInterval:10_000})
   const fees=useQuery({queryKey:["admin","fees"],queryFn:api.fees,refetchInterval:10_000})
+  const dailyReport=useQuery({queryKey:["admin","daily-report",reportRange.from,reportRange.to],queryFn:()=>api.dailyReport(reportRange.from,reportRange.to),refetchInterval:10_000})
   const bootstrap=useQuery({queryKey:["admin","bootstrap"],queryFn:api.bootstrapStatus,refetchInterval:10_000})
   const state=reconciliation.data?.status
-  const error=reconciliation.error??wallets.error??accounts.error??records.error??fees.error??bootstrap.error
+  const error=reconciliation.error??wallets.error??accounts.error??records.error??fees.error??dailyReport.error??bootstrap.error
   const failedRecords=records.data?.filter(record=>isFailure(record.status))??[]
 
   return <main>
@@ -36,7 +38,7 @@ export function AdminDashboard(){
     </div>
     <section className="card history"><h2>Mapa klientów i custody</h2><p className="hint">Wizualizacja pochodzi z pozycji ledgeru. Źródłem decyzji o pokryciu pozostaje backendowa rekonsyliacja.</p><div className="custody-graph"><div className="graph-wallet">HOT + COLD<strong>{formatRaw(reconciliation.data?.custodyTotalRaw)}</strong></div><div className="graph-line"/><div className="client-nodes">{accounts.data?.map(account=><div className="client-node" key={account.clientId}><Users/><span>{names[account.clientId]??account.clientId}</span><strong>{rawToRusd(account.availableRaw)} rUSD</strong><small>Zablokowane: {rawToRusd(account.lockedRaw)}</small></div>)}</div></div></section>
     <section className="card history"><h2>Ostatnie operacje</h2><p className="hint">Przepływ jest budowany z rejestru usług CASP i służy do audytu. Nie jest źródłem sald ani decyzji o pokryciu.</p><div className="operation-flow">{records.data?.slice(0,6).map(record=><Operation key={record.recordId} record={record}/>)}</div>{records.data?.length===0&&<p className="empty-state">Brak zarejestrowanych operacji klientów.</p>}</section>
-    <section className="card history"><h2>Raportowanie dzienne</h2><p className="hint">Agregaty przekazywane emitentowi zostaną podłączone w punkcie 8 roadmapy. Panel nie generuje danych zastępczych.</p></section>
+    <section className="card history"><h2>Raportowanie dzienne</h2><p className="hint">Ten sam deterministyczny agregat CASP jest udostępniany emitentowi. Zakupy i sprzedaże za fiat są widoczne w aktywności ogólnej, ale wykluczone z estymaty użycia jako środka wymiany.</p><div className="daily-report">{dailyReport.data?.days.map(day=><article key={day.dateUtc}><strong>{day.dateUtc}</strong><span>Wszystkie operacje: {day.totalOperationCount}</span><span>Środek wymiany: {day.meansOfExchangeCount}</span><span>Wartość: {formatMinor(day.meansOfExchangeValueUsdMinor)} USD</span><small>{day.methodologyVersion} · USD/EUR 1:1</small></article>)}</div>{dailyReport.data?.days.length===0&&<p className="empty-state">Brak aktywności w ostatnich siedmiu dniach.</p>}</section>
   </main>
 }
 
@@ -49,3 +51,5 @@ function shortHash(value:string|undefined|null){return value?`${value.slice(0,10
 function statusLabel(value:"balanced"|"warning"|"blocked"|"unavailable"){return {balanced:"Zgodność potwierdzona",warning:"Pokrycie z ostrzeżeniem",blocked:"Operacje zakupowe zablokowane",unavailable:"Brak wiarygodnych danych"}[value]}
 function operationLabel(value:string){return value==="purchase"?"zakup":value==="sale"?"sprzedaż":value}
 function isFailure(value:string){return ["failed","rejected","cancelled"].includes(value.toLowerCase())}
+function formatMinor(value:string){return (Number(value)/100).toLocaleString("pl-PL",{minimumFractionDigits:2,maximumFractionDigits:2})}
+function lastSevenDays(){const to=new Date();const from=new Date(to);from.setUTCDate(from.getUTCDate()-6);return {from:from.toISOString().slice(0,10),to:to.toISOString().slice(0,10)}}

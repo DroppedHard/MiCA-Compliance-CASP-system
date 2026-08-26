@@ -19,7 +19,7 @@ Open one of the routes:
 
 Before the first retail purchase, initialize CASP inventory with the admin bootstrap endpoint described in `../backend/README.md`.
 
-The administrator route polls the CASP backend every 10 seconds. It presents custody reconciliation, hot/cold/corporate wallet balances, customer liabilities, pending CASP fees, unallocated inventory, issuer bootstrap state and recent service records. Daily regulatory aggregates remain intentionally absent until the reporting integration described in roadmap item 8 is implemented.
+The administrator route polls the CASP backend every 10 seconds. It presents custody reconciliation, hot/cold/corporate wallet balances, customer liabilities, pending CASP fees, unallocated inventory, issuer bootstrap state, recent service records and the last seven days of transaction-reporting aggregates.
 
 An internal transfer debits the gross amount from the selected sender, assigns the net amount to another demo customer and accrues a 0.1% demo transaction fee. It is an atomic, gas-free SQLite operation; it does not move tokens between blockchain wallets.
 

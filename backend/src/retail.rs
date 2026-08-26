@@ -44,6 +44,33 @@ pub struct ServiceRecord {
     pub blockchain_transaction_hash: Option<String>,
     pub decision_actor: String,
     pub created_at_unix_ms: u64,
+    pub record_status: String,
+    pub received_at_unix_ms: u64,
+    pub accepted_at_unix_ms: Option<u64>,
+    pub executed_at_unix_ms: Option<u64>,
+    pub settled_at_unix_ms: Option<u64>,
+    pub failed_at_unix_ms: Option<u64>,
+    pub price_method: String,
+    pub unit_price_minor: Option<String>,
+    pub gross_quantity_raw: String,
+    pub net_quantity_raw: String,
+    pub fee_quantity_raw: String,
+    pub instruction_channel: String,
+    pub execution_actor: String,
+    pub policy_version: String,
+    pub rejection_reason: Option<String>,
+    pub retention_until_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRecordAmendment {
+    pub amendment_id: String,
+    pub original_record_id: String,
+    pub amendment_type: String,
+    pub reason: String,
+    pub actor: String,
+    pub created_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

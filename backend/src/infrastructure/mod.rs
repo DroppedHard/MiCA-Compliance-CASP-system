@@ -1,11 +1,13 @@
 mod ethereum;
 mod http;
+mod inventory_sqlite;
 mod reconciliation_sqlite;
 mod reporting_sqlite;
 mod retail_sqlite;
 mod sqlite;
 pub use ethereum::AlloyWalletGateway;
 pub use http::{HttpBankGateway, HttpIssuerGateway};
+pub use inventory_sqlite::SqliteInventoryStore;
 pub use reconciliation_sqlite::SqliteReconciliationStore;
 pub use reporting_sqlite::SqliteReportingStore;
 pub use retail_sqlite::SqliteRetailStore;

@@ -1,5 +1,8 @@
 use crate::{
-    retail::{ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord},
+    retail::{
+        ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord,
+        ServiceRecordAmendment,
+    },
     retail_application::{RetailError, RetailStore, TransferPosting},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -24,6 +27,16 @@ impl SqliteRetailStore {
         connection
             .execute_batch(include_str!("../../migrations/0004_internal_transfers.sql"))
             .map_err(storage)?;
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/0005_inventory_replenishments.sql"
+            ))
+            .map_err(storage)?;
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/0006_extended_service_records.sql"
+            ))
+            .map_err(storage)?;
         migrate_sale_order_type(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -41,6 +54,42 @@ impl RetailStore for SqliteRetailStore {
             )
             .map_err(storage)?;
         Ok(())
+    }
+
+    fn add_inventory_once(
+        &self,
+        operation: &str,
+        wallet: &str,
+        amount: u64,
+    ) -> Result<(), RetailError> {
+        let mut connection = self.connection.lock().map_err(storage)?;
+        let transaction = connection.transaction().map_err(storage)?;
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO inventory_replenishment_postings(operation_id,wallet_role,amount_raw,created_at_unix_ms) VALUES(?1,?2,?3,?4)",
+                params![operation, wallet, as_i64(amount)?, now() as i64],
+            )
+            .map_err(storage)?;
+        if inserted == 1 {
+            transaction
+                .execute(
+                    "UPDATE inventory_state SET available_raw=available_raw+?1 WHERE singleton=1 AND activated_at_unix_ms IS NOT NULL",
+                    [as_i64(amount)?],
+                )
+                .map_err(storage)?;
+        } else {
+            let recorded: i64 = transaction
+                .query_row(
+                    "SELECT amount_raw FROM inventory_replenishment_postings WHERE operation_id=?1 AND wallet_role=?2",
+                    params![operation, wallet],
+                    |row| row.get(0),
+                )
+                .map_err(storage)?;
+            if recorded != as_i64(amount)? {
+                return Err(RetailError::IdempotencyConflict);
+            }
+        }
+        transaction.commit().map_err(storage)
     }
 
     fn account(&self, client: &str) -> Result<ClientAccount, RetailError> {
@@ -277,34 +326,98 @@ impl RetailStore for SqliteRetailStore {
     }
 
     fn fail_redemption(&self, id: &str, message: &str) -> Result<(), RetailError> {
-        self.connection.lock().map_err(storage)?.execute("UPDATE retail_orders SET status='issuer_retry_required',last_error=?1,updated_at_unix_ms=?2 WHERE operation_id=?3 AND status<>'completed'",params![message,now() as i64,id]).map_err(storage)?;
+        let mut connection = self.connection.lock().map_err(storage)?;
+        let tx = connection.transaction().map_err(storage)?;
+        let timestamp = now() as i64;
+        tx.execute("UPDATE retail_orders SET status='issuer_retry_required',last_error=?1,updated_at_unix_ms=?2 WHERE operation_id=?3 AND status<>'completed'",params![message,timestamp,id]).map_err(storage)?;
+        tx.execute("UPDATE service_record_details SET failed_at_unix_ms=?1,rejection_reason=?2 WHERE record_id=(SELECT record_id FROM service_records WHERE operation_id=?3 ORDER BY created_at_unix_ms DESC LIMIT 1)",params![timestamp,message,id]).map_err(storage)?;
+        tx.commit().map_err(storage)?;
         Ok(())
     }
 
     fn records(&self, client: &str) -> Result<Vec<ServiceRecord>, RetailError> {
         let connection = self.connection.lock().map_err(storage)?;
-        let mut statement=connection.prepare("SELECT record_id,operation_id,client_id,service_type,order_type,asset_symbol,contract_address,chain_id,quantity_raw,fiat_currency,gross_fiat_minor,fee_minor,status,source_account,destination_account,blockchain_transaction_hash,decision_actor,created_at_unix_ms FROM service_records WHERE client_id=?1 OR source_account=?1 OR destination_account=?1 ORDER BY created_at_unix_ms DESC,record_id DESC LIMIT 200").map_err(storage)?;
+        let mut statement = connection
+            .prepare(&format!("{RECORD_SELECT} WHERE s.client_id=?1 OR s.source_account=?1 OR s.destination_account=?1 ORDER BY s.created_at_unix_ms DESC,s.record_id DESC LIMIT 200"))
+            .map_err(storage)?;
         statement
-            .query_map([client], |r| {
-                Ok(ServiceRecord {
-                    record_id: r.get(0)?,
-                    operation_id: r.get(1)?,
-                    client_id: r.get(2)?,
-                    service_type: r.get(3)?,
-                    order_type: r.get(4)?,
-                    asset_symbol: r.get(5)?,
-                    contract_address: r.get(6)?,
-                    chain_id: r.get::<_, i64>(7)? as u64,
-                    quantity_raw: r.get::<_, i64>(8)?.to_string(),
-                    fiat_currency: r.get(9)?,
-                    gross_fiat_minor: r.get::<_, i64>(10)?.to_string(),
-                    fee_minor: r.get::<_, i64>(11)?.to_string(),
-                    status: r.get(12)?,
-                    source_account: r.get(13)?,
-                    destination_account: r.get(14)?,
-                    blockchain_transaction_hash: r.get(15)?,
-                    decision_actor: r.get(16)?,
-                    created_at_unix_ms: r.get::<_, i64>(17)? as u64,
+            .query_map([client], map_record)
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)
+    }
+
+    fn all_records(&self) -> Result<Vec<ServiceRecord>, RetailError> {
+        let connection = self.connection.lock().map_err(storage)?;
+        let mut statement = connection
+            .prepare(&format!(
+                "{RECORD_SELECT} ORDER BY s.created_at_unix_ms DESC,s.record_id DESC LIMIT 1000"
+            ))
+            .map_err(storage)?;
+        statement
+            .query_map([], map_record)
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)
+    }
+
+    fn amend_record(
+        &self,
+        original: &str,
+        amendment_type: &str,
+        reason: &str,
+    ) -> Result<ServiceRecordAmendment, RetailError> {
+        let connection = self.connection.lock().map_err(storage)?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM service_records WHERE record_id=?1)",
+                [original],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if !exists {
+            return Err(RetailError::Invalid(
+                "original service record does not exist".into(),
+            ));
+        }
+        let amendment = ServiceRecordAmendment {
+            amendment_id: Uuid::now_v7().to_string(),
+            original_record_id: original.to_owned(),
+            amendment_type: amendment_type.to_owned(),
+            reason: reason.to_owned(),
+            actor: "casp-admin-demo".into(),
+            created_at_unix_ms: now(),
+        };
+        connection
+            .execute(
+                "INSERT INTO service_record_amendments VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    amendment.amendment_id,
+                    amendment.original_record_id,
+                    amendment.amendment_type,
+                    amendment.reason,
+                    amendment.actor,
+                    amendment.created_at_unix_ms as i64
+                ],
+            )
+            .map_err(storage)?;
+        Ok(amendment)
+    }
+
+    fn amendments(&self) -> Result<Vec<ServiceRecordAmendment>, RetailError> {
+        let connection = self.connection.lock().map_err(storage)?;
+        let mut statement = connection
+            .prepare("SELECT amendment_id,original_record_id,amendment_type,reason,actor,created_at_unix_ms FROM service_record_amendments ORDER BY created_at_unix_ms DESC")
+            .map_err(storage)?;
+        statement
+            .query_map([], |row| {
+                Ok(ServiceRecordAmendment {
+                    amendment_id: row.get(0)?,
+                    original_record_id: row.get(1)?,
+                    amendment_type: row.get(2)?,
+                    reason: row.get(3)?,
+                    actor: row.get(4)?,
+                    created_at_unix_ms: row.get::<_, i64>(5)? as u64,
                 })
             })
             .map_err(storage)?
@@ -471,8 +584,65 @@ fn record(
     } else {
         "exchange_of_crypto_assets_for_funds"
     };
-    tx.execute("INSERT INTO service_records(record_id,operation_id,client_id,service_type,order_type,asset_symbol,contract_address,chain_id,quantity_raw,fiat_currency,gross_fiat_minor,fee_minor,status,source_account,destination_account,blockchain_transaction_hash,decision_actor,created_at_unix_ms) VALUES(?1,?2,?3,?4,?5,'rUSD',?6,?7,?8,'USD',?9,0,?10,?11,?12,?13,'casp-retail-demo-v1',?14)",params![Uuid::now_v7().to_string(),id,client,service_type,kind,contract,as_i64(chain)?,as_i64(raw)?,as_i64(cents)?,status,source,destination,hash,now() as i64]).map_err(storage)?;
+    let record_id = Uuid::now_v7().to_string();
+    let timestamp = now();
+    let (fee_raw, net_raw) = if kind == "internal_transfer" {
+        let fee = raw / 1_000;
+        (fee, raw - fee)
+    } else {
+        (0, raw)
+    };
+    tx.execute("INSERT INTO service_records(record_id,operation_id,client_id,service_type,order_type,asset_symbol,contract_address,chain_id,quantity_raw,fiat_currency,gross_fiat_minor,fee_minor,status,source_account,destination_account,blockchain_transaction_hash,decision_actor,created_at_unix_ms) VALUES(?1,?2,?3,?4,?5,'rUSD',?6,?7,?8,'USD',?9,0,?10,?11,?12,?13,'casp-retail-demo-v1',?14)",params![record_id,id,client,service_type,kind,contract,as_i64(chain)?,as_i64(raw)?,as_i64(cents)?,status,source,destination,hash,timestamp as i64]).map_err(storage)?;
+    let completed = status == "completed";
+    let unit_price = if kind == "internal_transfer" {
+        None
+    } else {
+        Some(100_i64)
+    };
+    let retention = timestamp.saturating_add(5 * 365 * 24 * 60 * 60 * 1_000);
+    tx.execute("INSERT INTO service_record_details(record_id,record_status,received_at_unix_ms,accepted_at_unix_ms,executed_at_unix_ms,settled_at_unix_ms,failed_at_unix_ms,price_method,unit_price_minor,gross_quantity_raw,net_quantity_raw,fee_quantity_raw,instruction_channel,execution_actor,policy_version,rejection_reason,retention_until_unix_ms) VALUES(?1,'new',?2,?2,?3,?3,NULL,?4,?5,?6,?7,?8,'demo_web','casp-retail-engine','casp-service-record-v2',NULL,?9)",params![record_id,timestamp as i64,completed.then_some(timestamp as i64),if kind=="internal_transfer"{"not_applicable"}else{"fixed_parity_1_rusd_1_usd"},unit_price,as_i64(raw)?,as_i64(net_raw)?,as_i64(fee_raw)?,retention as i64]).map_err(storage)?;
     Ok(())
+}
+
+const RECORD_SELECT: &str = "SELECT s.record_id,s.operation_id,s.client_id,s.service_type,s.order_type,s.asset_symbol,s.contract_address,s.chain_id,s.quantity_raw,s.fiat_currency,s.gross_fiat_minor,s.fee_minor,s.status,s.source_account,s.destination_account,s.blockchain_transaction_hash,s.decision_actor,s.created_at_unix_ms,COALESCE(d.record_status,'new'),COALESCE(d.received_at_unix_ms,s.created_at_unix_ms),d.accepted_at_unix_ms,d.executed_at_unix_ms,d.settled_at_unix_ms,d.failed_at_unix_ms,COALESCE(d.price_method,'legacy_unspecified'),d.unit_price_minor,COALESCE(d.gross_quantity_raw,s.quantity_raw),COALESCE(d.net_quantity_raw,s.quantity_raw),COALESCE(d.fee_quantity_raw,0),COALESCE(d.instruction_channel,'legacy_unspecified'),COALESCE(d.execution_actor,s.decision_actor),COALESCE(d.policy_version,'casp-service-record-v1'),d.rejection_reason,COALESCE(d.retention_until_unix_ms,s.created_at_unix_ms) FROM service_records s LEFT JOIN service_record_details d ON d.record_id=s.record_id";
+
+fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServiceRecord> {
+    Ok(ServiceRecord {
+        record_id: row.get(0)?,
+        operation_id: row.get(1)?,
+        client_id: row.get(2)?,
+        service_type: row.get(3)?,
+        order_type: row.get(4)?,
+        asset_symbol: row.get(5)?,
+        contract_address: row.get(6)?,
+        chain_id: row.get::<_, i64>(7)? as u64,
+        quantity_raw: row.get::<_, i64>(8)?.to_string(),
+        fiat_currency: row.get(9)?,
+        gross_fiat_minor: row.get::<_, i64>(10)?.to_string(),
+        fee_minor: row.get::<_, i64>(11)?.to_string(),
+        status: row.get(12)?,
+        source_account: row.get(13)?,
+        destination_account: row.get(14)?,
+        blockchain_transaction_hash: row.get(15)?,
+        decision_actor: row.get(16)?,
+        created_at_unix_ms: row.get::<_, i64>(17)? as u64,
+        record_status: row.get(18)?,
+        received_at_unix_ms: row.get::<_, i64>(19)? as u64,
+        accepted_at_unix_ms: row.get::<_, Option<i64>>(20)?.map(|v| v as u64),
+        executed_at_unix_ms: row.get::<_, Option<i64>>(21)?.map(|v| v as u64),
+        settled_at_unix_ms: row.get::<_, Option<i64>>(22)?.map(|v| v as u64),
+        failed_at_unix_ms: row.get::<_, Option<i64>>(23)?.map(|v| v as u64),
+        price_method: row.get(24)?,
+        unit_price_minor: row.get::<_, Option<i64>>(25)?.map(|v| v.to_string()),
+        gross_quantity_raw: row.get::<_, i64>(26)?.to_string(),
+        net_quantity_raw: row.get::<_, i64>(27)?.to_string(),
+        fee_quantity_raw: row.get::<_, i64>(28)?.to_string(),
+        instruction_channel: row.get(29)?,
+        execution_actor: row.get(30)?,
+        policy_version: row.get(31)?,
+        rejection_reason: row.get(32)?,
+        retention_until_unix_ms: row.get::<_, i64>(33)? as u64,
+    })
 }
 fn order(connection: &Connection, id: &str) -> Result<Option<RetailOrder>, RetailError> {
     connection.query_row("SELECT operation_id,client_id,order_type,quantity_raw,fiat_currency,fiat_amount_minor,status,issuer_operation_id,blockchain_transaction_hash,last_error,created_at_unix_ms,updated_at_unix_ms FROM retail_orders WHERE operation_id=?1",[id],|r|Ok(RetailOrder{operation_id:r.get(0)?,client_id:r.get(1)?,order_type:r.get(2)?,quantity_raw:r.get::<_,i64>(3)?.to_string(),fiat_currency:r.get(4)?,fiat_amount_minor:r.get::<_,i64>(5)?.to_string(),status:r.get(6)?,issuer_operation_id:r.get(7)?,blockchain_transaction_hash:r.get(8)?,last_error:r.get(9)?,created_at_unix_ms:r.get::<_,i64>(10)? as u64,updated_at_unix_ms:r.get::<_,i64>(11)? as u64})).optional().map_err(storage)
@@ -615,6 +785,56 @@ mod tests {
             s.purchase("p", CLIENT, 1, "x", 1),
             Err(RetailError::InsufficientInventory)
         ))
+    }
+
+    #[test]
+    fn replenishment_posting_increases_inventory_exactly_once() {
+        let store = SqliteRetailStore::open(":memory:").unwrap();
+        store.activate_inventory(1_000_000).unwrap();
+        store
+            .add_inventory_once("inventory-1", "cold", 800_000)
+            .unwrap();
+        store
+            .add_inventory_once("inventory-1", "cold", 800_000)
+            .unwrap();
+        store
+            .add_inventory_once("inventory-1", "hot", 200_000)
+            .unwrap();
+        assert_eq!(
+            store.account("alice").unwrap().inventory_available_raw,
+            "2000000"
+        );
+        assert!(matches!(
+            store.add_inventory_once("inventory-1", "hot", 200_001),
+            Err(RetailError::IdempotencyConflict)
+        ));
+    }
+
+    #[test]
+    fn extended_record_keeps_execution_metadata_and_append_only_amendment() {
+        let store = SqliteRetailStore::open(":memory:").unwrap();
+        store.activate_inventory(10_000_000).unwrap();
+        store
+            .purchase("purchase-record", CLIENT, 100, "0xasset", 31337)
+            .unwrap();
+        let record = store.records(CLIENT).unwrap().remove(0);
+        assert_eq!(record.price_method, "fixed_parity_1_rusd_1_usd");
+        assert_eq!(record.unit_price_minor.as_deref(), Some("100"));
+        assert_eq!(record.gross_quantity_raw, "1000000");
+        assert_eq!(record.net_quantity_raw, "1000000");
+        assert_eq!(record.instruction_channel, "demo_web");
+        assert!(record.settled_at_unix_ms.is_some());
+
+        let amendment = store
+            .amend_record(
+                &record.record_id,
+                "correction",
+                "demo classification correction",
+            )
+            .unwrap();
+        assert_eq!(amendment.original_record_id, record.record_id);
+        assert_eq!(store.records(CLIENT).unwrap().len(), 1);
+        assert_eq!(store.amendments().unwrap(), vec![amendment]);
     }
 
     #[test]

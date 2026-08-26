@@ -1,5 +1,8 @@
 use crate::reconciliation::ReconciliationService;
-use crate::retail::{ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord};
+use crate::retail::{
+    ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord,
+    ServiceRecordAmendment,
+};
 use alloy::primitives::Address;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -7,6 +10,12 @@ use thiserror::Error;
 const TOKEN_UNITS_PER_CENT: u64 = 10_000;
 pub trait RetailStore: Send + Sync {
     fn activate_inventory(&self, amount: u64) -> Result<(), RetailError>;
+    fn add_inventory_once(
+        &self,
+        operation: &str,
+        wallet: &str,
+        amount: u64,
+    ) -> Result<(), RetailError>;
     fn account(&self, client: &str) -> Result<ClientAccount, RetailError>;
     fn accounts(&self) -> Result<Vec<ClientAccount>, RetailError>;
     fn purchase(
@@ -37,6 +46,14 @@ pub trait RetailStore: Send + Sync {
     fn complete_redemption(&self, id: &str, tx: Option<&str>) -> Result<RetailOrder, RetailError>;
     fn fail_redemption(&self, id: &str, message: &str) -> Result<(), RetailError>;
     fn records(&self, client: &str) -> Result<Vec<ServiceRecord>, RetailError>;
+    fn all_records(&self) -> Result<Vec<ServiceRecord>, RetailError>;
+    fn amend_record(
+        &self,
+        original: &str,
+        amendment_type: &str,
+        reason: &str,
+    ) -> Result<ServiceRecordAmendment, RetailError>;
+    fn amendments(&self) -> Result<Vec<ServiceRecordAmendment>, RetailError>;
     fn transfer(&self, command: TransferPosting<'_>) -> Result<InternalTransfer, RetailError>;
     fn fee_position(&self) -> Result<FeePosition, RetailError>;
 }
@@ -105,6 +122,26 @@ impl RetailService {
     pub fn records(&self, client: &str) -> Result<Vec<ServiceRecord>, RetailError> {
         validate_client(client)?;
         self.store.records(client)
+    }
+    pub fn all_records(&self) -> Result<Vec<ServiceRecord>, RetailError> {
+        self.store.all_records()
+    }
+    pub fn amendments(&self) -> Result<Vec<ServiceRecordAmendment>, RetailError> {
+        self.store.amendments()
+    }
+    pub fn amend_record(
+        &self,
+        original: &str,
+        amendment_type: &str,
+        reason: &str,
+    ) -> Result<ServiceRecordAmendment, RetailError> {
+        validate_id(original)?;
+        if !matches!(amendment_type, "correction" | "reversal") || reason.trim().is_empty() {
+            return Err(RetailError::Invalid(
+                "amendmentType must be correction or reversal and reason is required".into(),
+            ));
+        }
+        self.store.amend_record(original, amendment_type, reason)
     }
     pub fn fee_position(&self) -> Result<FeePosition, RetailError> {
         self.store.fee_position()

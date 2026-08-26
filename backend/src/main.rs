@@ -4,8 +4,9 @@ use casp_backend::{
     config::Config,
     infrastructure::{
         AlloyWalletGateway, HttpBankGateway, HttpIssuerGateway, SqliteBootstrapStore,
-        SqliteReconciliationStore, SqliteReportingStore, SqliteRetailStore,
+        SqliteInventoryStore, SqliteReconciliationStore, SqliteReportingStore, SqliteRetailStore,
     },
+    inventory::InventoryService,
     reconciliation::ReconciliationService,
     reporting::ReportingService,
     retail_application::RetailService,
@@ -33,10 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?,
     );
     let issuer = Arc::new(HttpIssuerGateway::new(&c.issuer_url));
+    let bank = Arc::new(HttpBankGateway::new(&c.mock_bank_url));
     let service = Arc::new(BootstrapService::new(
         Arc::new(SqliteBootstrapStore::open(&c.database_path)?),
         issuer.clone(),
-        Arc::new(HttpBankGateway::new(&c.mock_bank_url)),
+        bank.clone(),
         wallet.clone(),
         c.corporate_address,
         c.hot_address,
@@ -46,14 +48,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reconciliation = Arc::new(ReconciliationService::new(
         Arc::new(SqliteReconciliationStore::open(&c.database_path)?),
         retail_store.clone(),
-        wallet,
+        wallet.clone(),
         c.corporate_address,
         c.hot_address,
         c.cold_address,
     ));
     let retail = Arc::new(RetailService::new(
-        retail_store,
-        issuer,
+        retail_store.clone(),
+        issuer.clone(),
         c.hot_address,
         c.token_address.to_checksum(None),
         c.chain_id,
@@ -62,6 +64,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reporting = Arc::new(ReportingService::new(Arc::new(SqliteReportingStore::open(
         &c.database_path,
     )?)));
+    let inventory = Arc::new(InventoryService::new(
+        Arc::new(SqliteInventoryStore::open(&c.database_path)?),
+        issuer,
+        bank,
+        wallet,
+        retail_store,
+        reconciliation.clone(),
+        c.corporate_address,
+        c.hot_address,
+        c.cold_address,
+    ));
     // A CASP cannot allocate customer entitlements before it owns the matching
     // rUSD pool. Resume the idempotent 10,000 rUSD bootstrap on every startup;
     // completed boundaries are read from SQLite and are never executed twice.
@@ -79,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(address=%c.http_address,"CASP HTTP server started");
     axum::serve(
         listener,
-        api::router(service, retail, reconciliation, reporting),
+        api::router(service, retail, reconciliation, reporting, inventory),
     )
     .await?;
     Ok(())

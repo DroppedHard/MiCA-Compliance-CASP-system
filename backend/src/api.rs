@@ -1,6 +1,9 @@
 use crate::{
     application::{BootstrapError, BootstrapService},
     domain::{BootstrapOperation, WalletBalances},
+    inventory::{
+        InventoryError, InventoryOperation, InventoryService, RebalancingPlan, rebalancing_plan,
+    },
     reconciliation::{ReconciliationService, ReconciliationSnapshot},
     reporting::{DailyTransactionReport, ReportingError, ReportingService},
     retail::{ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord},
@@ -21,12 +24,14 @@ struct AppState {
     retail: Arc<RetailService>,
     reconciliation: Arc<ReconciliationService>,
     reporting: Arc<ReportingService>,
+    inventory: Arc<InventoryService>,
 }
 pub fn router(
     service: Arc<BootstrapService>,
     retail: Arc<RetailService>,
     reconciliation: Arc<ReconciliationService>,
     reporting: Arc<ReportingService>,
+    inventory: Arc<InventoryService>,
 ) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -37,6 +42,16 @@ pub fn router(
         .route("/api/v1/admin/wallets", get(wallets))
         .route("/api/v1/admin/reconciliation", get(get_reconciliation))
         .route("/api/v1/admin/fees", get(fee_position))
+        .route(
+            "/api/v1/admin/inventory-replenishments",
+            post(replenish).get(replenishments),
+        )
+        .route("/api/v1/admin/rebalancing-plan", get(rebalance_plan))
+        .route("/api/v1/admin/service-records", get(all_records))
+        .route(
+            "/api/v1/admin/service-record-amendments",
+            post(amend_record).get(amendments),
+        )
         .route("/api/v1/reports/daily-transactions", get(daily_report))
         .route("/api/v1/clients", get(accounts))
         .route("/api/v1/clients/{client_id}/account", get(account))
@@ -50,7 +65,42 @@ pub fn router(
             retail,
             reconciliation,
             reporting,
+            inventory,
         })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplenishmentRequest {
+    operation_id: String,
+    amount_usd_minor: u64,
+}
+async fn replenish(
+    State(s): State<AppState>,
+    Json(body): Json<ReplenishmentRequest>,
+) -> Result<Json<InventoryOperation>, InventoryApiError> {
+    s.inventory
+        .execute(&body.operation_id, body.amount_usd_minor)
+        .await
+        .map(Json)
+        .map_err(InventoryApiError)
+}
+async fn replenishments(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<InventoryOperation>>, InventoryApiError> {
+    s.inventory.list().map(Json).map_err(InventoryApiError)
+}
+async fn rebalance_plan(
+    State(s): State<AppState>,
+) -> Result<Json<RebalancingPlan>, InventoryApiError> {
+    let balances = s
+        .service
+        .balances()
+        .await
+        .map_err(|error| InventoryApiError(InventoryError::from(error)))?;
+    rebalancing_plan(&balances)
+        .map(Json)
+        .map_err(InventoryApiError)
 }
 #[derive(Deserialize)]
 struct DailyReportQuery {
@@ -113,6 +163,32 @@ async fn records(
 }
 async fn fee_position(State(s): State<AppState>) -> Result<Json<FeePosition>, RetailApiError> {
     s.retail.fee_position().map(Json).map_err(RetailApiError)
+}
+async fn all_records(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<ServiceRecord>>, RetailApiError> {
+    s.retail.all_records().map(Json).map_err(RetailApiError)
+}
+async fn amendments(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<crate::retail::ServiceRecordAmendment>>, RetailApiError> {
+    s.retail.amendments().map(Json).map_err(RetailApiError)
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AmendmentRequest {
+    original_record_id: String,
+    amendment_type: String,
+    reason: String,
+}
+async fn amend_record(
+    State(s): State<AppState>,
+    Json(body): Json<AmendmentRequest>,
+) -> Result<Json<crate::retail::ServiceRecordAmendment>, RetailApiError> {
+    s.retail
+        .amend_record(&body.original_record_id, &body.amendment_type, &body.reason)
+        .map(Json)
+        .map_err(RetailApiError)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -239,6 +315,29 @@ impl IntoResponse for ReportingApiError {
                 StatusCode::BAD_REQUEST
             }
             ReportingError::Overflow | ReportingError::Storage(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        (
+            status,
+            Json(ErrorBody {
+                error: self.0.to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+struct InventoryApiError(InventoryError);
+impl IntoResponse for InventoryApiError {
+    fn into_response(self) -> Response {
+        let status = match self.0 {
+            InventoryError::Invalid(_) => StatusCode::BAD_REQUEST,
+            InventoryError::IdempotencyConflict | InventoryError::Reconciliation(_) => {
+                StatusCode::CONFLICT
+            }
+            InventoryError::Bootstrap(_) => StatusCode::BAD_GATEWAY,
+            InventoryError::Overflow | InventoryError::Storage(_) | InventoryError::Ledger(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };

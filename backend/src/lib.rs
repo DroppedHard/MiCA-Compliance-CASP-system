@@ -3,6 +3,7 @@ pub mod application;
 pub mod config;
 pub mod domain;
 pub mod infrastructure;
+pub mod inventory;
 pub mod reconciliation;
 pub mod reporting;
 pub mod retail;

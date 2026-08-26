@@ -38,7 +38,7 @@ CASP persists operation_id
 
 SQLite persists every completed boundary. A retry resumes the same operation. Issuer and bank calls reuse the same operation ID. Wallet distribution calculates the difference between the current balance and the fixed target rather than blindly repeating a transfer.
 
-This target-balance technique is safe for the isolated initial bootstrap only. Later inventory purchases need a general append-only custody ledger and operation-correlated transfer design because hot and cold wallets will already contain changing client assets.
+This fixed target-balance technique is used only by the initial bootstrap. Later purchases use the append-only, operation-correlated inventory replenishment described below because hot and cold wallets already contain changing client assets.
 
 ## Configuration
 
@@ -120,6 +120,37 @@ Calling the POST endpoint again returns the existing completed operation and doe
 Retail request bodies contain a caller-generated `operationId`. Reusing it with the same payload returns the same operation without posting balances twice; reusing it with different parameters returns a conflict. The demo exposes three deterministic customers: `alice`, `bob` and `carol`.
 
 Customer purchase and sale are CASP-internal SQLite postings. They move value between the unallocated-inventory position and the selected customer's position, while the total rUSD held in CASP hot/cold custody wallets remains unchanged. They do not call Ethereum or the issuer. The separate `redemptions` endpoint represents redemption at the issuer and is intentionally not wired to the current buy/sell screen.
+
+## Manual inventory increase
+
+Automatic replenishment is intentionally disabled. An administrator can buy an additional pool through the CASP facade:
+
+```powershell
+$body = @{ operationId = "inventory-demo-1"; amountUsdMinor = 100000 } | ConvertTo-Json
+Invoke-RestMethod -Method Post -ContentType "application/json" -Body $body http://127.0.0.1:3200/api/v1/admin/inventory-replenishments
+```
+
+`100000` means USD 1,000.00. The operation reuses the issuer order and mockBank transfer, mints to the corporate wallet, then sends 80% to cold and 20% to hot custody. Its progress and transaction hashes are persisted. Repeating the same identifier and amount resumes safely; reusing the identifier with another amount is rejected.
+
+Inspect operations and the advisory allocation plan with:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:3200/api/v1/admin/inventory-replenishments
+Invoke-RestMethod http://127.0.0.1:3200/api/v1/admin/rebalancing-plan
+```
+
+The 20/80 rule and manual replenishment are demo CASP business policies, not requirements stated by MiCA. The calculator reports drift but does not sign corrective transfers out of hot or cold wallets.
+
+## Extended service-record export
+
+The CASP stores lifecycle, price methodology, gross/net/fee quantities, processing actors, policy version and a demo retention deadline alongside each new service record. Read the combined JSON export and append-only amendments with:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:3200/api/v1/admin/service-records
+Invoke-RestMethod http://127.0.0.1:3200/api/v1/admin/service-record-amendments
+```
+
+The detailed field mapping and exclusions are documented in `../docs/service-records.md`.
 
 Example purchase of 25 rUSD:
 

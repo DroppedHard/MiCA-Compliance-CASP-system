@@ -2,9 +2,9 @@
 
 ## Custody reconciliation
 
-The backend persists custody evidence under policy `casp-custody-reconciliation-v1`. It compares on-chain hot and cold wallet balances with the sum of customer available positions, customer locked positions and unallocated inventory. The corporate wallet is reported separately and never counted as coverage for client entitlements.
+The backend persists custody evidence under policy `casp-custody-reconciliation-v1`. It compares on-chain hot and cold wallet balances with the sum of customer available positions, customer locked positions, unallocated inventory and CASP fees accrued but not yet swept on-chain. The corporate wallet is reported separately and never counted as coverage for client entitlements.
 
-Reconciliation runs immediately after the startup bootstrap, every five minutes, and before and after current purchase, sale and redemption operations. New customer purchases fail closed when evidence is unavailable or totals differ. Sales and redemptions remain available because they do not create a new customer entitlement. Allocation drift away from the demo 20/80 target produces `warning` without claiming a custody shortfall.
+Reconciliation runs immediately after the startup bootstrap, every five minutes, and before and after current purchase, sale, internal-transfer and redemption operations. New customer purchases fail closed when evidence is unavailable or totals differ. Sales and redemptions remain available because they do not create a new customer entitlement. Allocation drift away from the demo 20/80 target produces `warning` without claiming a custody shortfall.
 
 Read the latest persisted snapshot:
 
@@ -106,11 +106,14 @@ Calling the POST endpoint again returns the existing completed operation and doe
 - `POST /api/v1/admin/bootstrap-inventory`
 - `GET /api/v1/admin/bootstrap-inventory`
 - `GET /api/v1/admin/wallets`
+- `GET /api/v1/admin/reconciliation`
+- `GET /api/v1/admin/fees`
 - `GET /api/v1/clients`
 - `GET /api/v1/clients/{clientId}/account`
 - `GET /api/v1/clients/{clientId}/records`
 - `POST /api/v1/clients/{clientId}/purchases`
 - `POST /api/v1/clients/{clientId}/sales`
+- `POST /api/v1/clients/{clientId}/transfers`
 - `POST /api/v1/clients/{clientId}/redemptions` (issuer-redemption integration; not used by the current customer screen)
 
 Retail request bodies contain a caller-generated `operationId`. Reusing it with the same payload returns the same operation without posting balances twice; reusing it with different parameters returns a conflict. The demo exposes three deterministic customers: `alice`, `bob` and `carol`.
@@ -130,6 +133,20 @@ Example CASP-internal sale of 10 rUSD (the token has six decimals):
 $body = @{ operationId = [guid]::NewGuid().ToString(); tokenAmountRaw = 10000000 } | ConvertTo-Json
 Invoke-RestMethod -Method Post -ContentType application/json -Body $body http://127.0.0.1:3200/api/v1/clients/alice/sales
 ```
+
+Example internal transfer of gross 10 rUSD from Alice to Bob:
+
+```powershell
+$body = @{
+  operationId = [guid]::NewGuid().ToString()
+  recipientClientId = "bob"
+  tokenAmountRaw = 10000000
+  purposeClassification = "private_transfer"
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -ContentType application/json -Body $body http://127.0.0.1:3200/api/v1/clients/alice/transfers
+```
+
+The sender is debited by the gross amount. The recipient receives 99.9%, while the 0.1% demo transaction fee is posted to `fee_position.pending_raw`. The three postings and the audit records share one SQLite transaction. No Ethereum transaction or gas fee is involved. Until a future on-chain sweep moves accrued fees to the corporate wallet, pending fees remain included in hot/cold custody obligations.
 
 ## Verification
 

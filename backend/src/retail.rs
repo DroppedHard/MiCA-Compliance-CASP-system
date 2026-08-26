@@ -45,3 +45,23 @@ pub struct ServiceRecord {
     pub decision_actor: String,
     pub created_at_unix_ms: u64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalTransfer {
+    pub operation_id: String,
+    pub sender_client_id: String,
+    pub recipient_client_id: String,
+    pub gross_raw: String,
+    pub fee_raw: String,
+    pub net_raw: String,
+    pub purpose_classification: String,
+    pub status: String,
+    pub created_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeePosition {
+    pub pending_raw: String,
+}

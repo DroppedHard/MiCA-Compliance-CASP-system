@@ -1,6 +1,6 @@
 use crate::{
-    retail::{ClientAccount, RetailOrder, ServiceRecord},
-    retail_application::{RetailError, RetailStore},
+    retail::{ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord},
+    retail_application::{RetailError, RetailStore, TransferPosting},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::{fs, path::Path, sync::Mutex};
@@ -20,6 +20,9 @@ impl SqliteRetailStore {
         let mut connection = Connection::open(path).map_err(storage)?;
         connection
             .execute_batch(include_str!("../../migrations/0002_retail.sql"))
+            .map_err(storage)?;
+        connection
+            .execute_batch(include_str!("../../migrations/0004_internal_transfers.sql"))
             .map_err(storage)?;
         migrate_sale_order_type(&mut connection)?;
         Ok(Self {
@@ -280,7 +283,7 @@ impl RetailStore for SqliteRetailStore {
 
     fn records(&self, client: &str) -> Result<Vec<ServiceRecord>, RetailError> {
         let connection = self.connection.lock().map_err(storage)?;
-        let mut statement=connection.prepare("SELECT record_id,operation_id,client_id,service_type,order_type,asset_symbol,contract_address,chain_id,quantity_raw,fiat_currency,gross_fiat_minor,fee_minor,status,source_account,destination_account,blockchain_transaction_hash,decision_actor,created_at_unix_ms FROM service_records WHERE client_id=?1 ORDER BY created_at_unix_ms DESC,record_id DESC LIMIT 200").map_err(storage)?;
+        let mut statement=connection.prepare("SELECT record_id,operation_id,client_id,service_type,order_type,asset_symbol,contract_address,chain_id,quantity_raw,fiat_currency,gross_fiat_minor,fee_minor,status,source_account,destination_account,blockchain_transaction_hash,decision_actor,created_at_unix_ms FROM service_records WHERE client_id=?1 OR source_account=?1 OR destination_account=?1 ORDER BY created_at_unix_ms DESC,record_id DESC LIMIT 200").map_err(storage)?;
         statement
             .query_map([client], |r| {
                 Ok(ServiceRecord {
@@ -307,6 +310,93 @@ impl RetailStore for SqliteRetailStore {
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)
+    }
+
+    fn transfer(&self, command: TransferPosting<'_>) -> Result<InternalTransfer, RetailError> {
+        let TransferPosting {
+            id,
+            sender,
+            recipient,
+            gross_raw: gross,
+            purpose,
+            contract,
+            chain,
+        } = command;
+        let fee = gross / 1_000;
+        let net = gross
+            .checked_sub(fee)
+            .ok_or_else(|| RetailError::Invalid("transfer fee exceeds amount".into()))?;
+        let mut connection = self.connection.lock().map_err(storage)?;
+        let tx = connection.transaction().map_err(storage)?;
+        if let Some(existing) = internal_transfer(&tx, id)? {
+            if existing.sender_client_id == sender
+                && existing.recipient_client_id == recipient
+                && existing.gross_raw == gross.to_string()
+                && existing.purpose_classification == purpose
+            {
+                return Ok(existing);
+            }
+            return Err(RetailError::IdempotencyConflict);
+        }
+        let changed = tx
+            .execute(
+                "UPDATE client_positions SET available_raw=available_raw-?1,updated_at_unix_ms=?2 WHERE client_id=?3 AND available_raw>=?1",
+                params![as_i64(gross)?, now() as i64, sender],
+            )
+            .map_err(storage)?;
+        if changed == 0 {
+            return Err(RetailError::InsufficientBalance);
+        }
+        tx.execute(
+            "UPDATE client_positions SET available_raw=available_raw+?1,updated_at_unix_ms=?2 WHERE client_id=?3",
+            params![as_i64(net)?, now() as i64, recipient],
+        )
+        .map_err(storage)?;
+        tx.execute(
+            "UPDATE fee_position SET pending_raw=pending_raw+?1 WHERE singleton=1",
+            [as_i64(fee)?],
+        )
+        .map_err(storage)?;
+        tx.execute(
+            "INSERT INTO internal_transfers(operation_id,sender_client_id,recipient_client_id,gross_raw,fee_raw,net_raw,purpose_classification,status,created_at_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,'completed',?8)",
+            params![id, sender, recipient, as_i64(gross)?, as_i64(fee)?, as_i64(net)?, purpose, now() as i64],
+        )
+        .map_err(storage)?;
+        ledger(&tx, id, "client", sender, "debit", gross)?;
+        ledger(&tx, id, "client", recipient, "credit", net)?;
+        ledger(&tx, id, "casp_fee_pending", "casp-fees", "credit", fee)?;
+        record(
+            &tx,
+            id,
+            sender,
+            "internal_transfer",
+            gross,
+            0,
+            "completed",
+            Some(sender),
+            Some(recipient),
+            None,
+            contract,
+            chain,
+        )?;
+        let result = internal_transfer(&tx, id)?
+            .ok_or_else(|| RetailError::Storage("transfer disappeared".into()))?;
+        tx.commit().map_err(storage)?;
+        Ok(result)
+    }
+
+    fn fee_position(&self) -> Result<FeePosition, RetailError> {
+        let connection = self.connection.lock().map_err(storage)?;
+        let pending: i64 = connection
+            .query_row(
+                "SELECT pending_raw FROM fee_position WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        Ok(FeePosition {
+            pending_raw: pending.to_string(),
+        })
     }
 }
 
@@ -376,11 +466,41 @@ fn record(
     contract: &str,
     chain: u64,
 ) -> Result<(), RetailError> {
-    tx.execute("INSERT INTO service_records VALUES(?1,?2,?3,'exchange_of_crypto_assets_for_funds',?4,'rUSD',?5,?6,?7,'USD',?8,0,?9,?10,?11,?12,'casp-retail-demo-v1',?13)",params![Uuid::now_v7().to_string(),id,client,kind,contract,as_i64(chain)?,as_i64(raw)?,as_i64(cents)?,status,source,destination,hash,now() as i64]).map_err(storage)?;
+    let service_type = if kind == "internal_transfer" {
+        "transfer_service"
+    } else {
+        "exchange_of_crypto_assets_for_funds"
+    };
+    tx.execute("INSERT INTO service_records(record_id,operation_id,client_id,service_type,order_type,asset_symbol,contract_address,chain_id,quantity_raw,fiat_currency,gross_fiat_minor,fee_minor,status,source_account,destination_account,blockchain_transaction_hash,decision_actor,created_at_unix_ms) VALUES(?1,?2,?3,?4,?5,'rUSD',?6,?7,?8,'USD',?9,0,?10,?11,?12,?13,'casp-retail-demo-v1',?14)",params![Uuid::now_v7().to_string(),id,client,service_type,kind,contract,as_i64(chain)?,as_i64(raw)?,as_i64(cents)?,status,source,destination,hash,now() as i64]).map_err(storage)?;
     Ok(())
 }
 fn order(connection: &Connection, id: &str) -> Result<Option<RetailOrder>, RetailError> {
     connection.query_row("SELECT operation_id,client_id,order_type,quantity_raw,fiat_currency,fiat_amount_minor,status,issuer_operation_id,blockchain_transaction_hash,last_error,created_at_unix_ms,updated_at_unix_ms FROM retail_orders WHERE operation_id=?1",[id],|r|Ok(RetailOrder{operation_id:r.get(0)?,client_id:r.get(1)?,order_type:r.get(2)?,quantity_raw:r.get::<_,i64>(3)?.to_string(),fiat_currency:r.get(4)?,fiat_amount_minor:r.get::<_,i64>(5)?.to_string(),status:r.get(6)?,issuer_operation_id:r.get(7)?,blockchain_transaction_hash:r.get(8)?,last_error:r.get(9)?,created_at_unix_ms:r.get::<_,i64>(10)? as u64,updated_at_unix_ms:r.get::<_,i64>(11)? as u64})).optional().map_err(storage)
+}
+fn internal_transfer(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<InternalTransfer>, RetailError> {
+    connection
+        .query_row(
+            "SELECT operation_id,sender_client_id,recipient_client_id,gross_raw,fee_raw,net_raw,purpose_classification,status,created_at_unix_ms FROM internal_transfers WHERE operation_id=?1",
+            [id],
+            |row| {
+                Ok(InternalTransfer {
+                    operation_id: row.get(0)?,
+                    sender_client_id: row.get(1)?,
+                    recipient_client_id: row.get(2)?,
+                    gross_raw: row.get::<_, i64>(3)?.to_string(),
+                    fee_raw: row.get::<_, i64>(4)?.to_string(),
+                    net_raw: row.get::<_, i64>(5)?.to_string(),
+                    purpose_classification: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at_unix_ms: row.get::<_, i64>(8)? as u64,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage)
 }
 fn verify_same(
     o: &RetailOrder,
@@ -432,6 +552,22 @@ fn migrate_sale_order_type(connection: &mut Connection) -> Result<(), RetailErro
 mod tests {
     use super::*;
     const CLIENT: &str = "alice";
+    fn posting<'a>(
+        id: &'a str,
+        sender: &'a str,
+        recipient: &'a str,
+        gross_raw: u64,
+    ) -> TransferPosting<'a> {
+        TransferPosting {
+            id,
+            sender,
+            recipient,
+            gross_raw,
+            purpose: "private_transfer",
+            contract: "x",
+            chain: 1,
+        }
+    }
     #[test]
     fn purchase_is_atomic_and_idempotent() {
         let s = SqliteRetailStore::open(":memory:").unwrap();
@@ -479,5 +615,55 @@ mod tests {
             s.purchase("p", CLIENT, 1, "x", 1),
             Err(RetailError::InsufficientInventory)
         ))
+    }
+
+    #[test]
+    fn transfer_is_atomic_idempotent_and_uses_exact_point_one_percent_fee() {
+        let s = SqliteRetailStore::open(":memory:").unwrap();
+        s.activate_inventory(10_000_000).unwrap();
+        s.purchase("purchase", CLIENT, 100, "x", 1).unwrap();
+
+        let first = s
+            .transfer(posting("transfer", CLIENT, "bob", 1_000_000))
+            .unwrap();
+        let replay = s
+            .transfer(posting("transfer", CLIENT, "bob", 1_000_000))
+            .unwrap();
+
+        assert_eq!(first, replay);
+        assert_eq!(first.fee_raw, "1000");
+        assert_eq!(first.net_raw, "999000");
+        assert_eq!(s.account(CLIENT).unwrap().available_raw, "0");
+        assert_eq!(s.account("bob").unwrap().available_raw, "999000");
+        assert_eq!(s.fee_position().unwrap().pending_raw, "1000");
+        assert_eq!(s.records(CLIENT).unwrap().len(), 2);
+        assert_eq!(s.records("bob").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn failed_transfer_does_not_write_partial_balances_or_fee() {
+        let s = SqliteRetailStore::open(":memory:").unwrap();
+        s.activate_inventory(10_000_000).unwrap();
+        assert!(matches!(
+            s.transfer(posting("transfer", CLIENT, "bob", 1_000_000)),
+            Err(RetailError::InsufficientBalance)
+        ));
+        assert_eq!(s.account(CLIENT).unwrap().available_raw, "0");
+        assert_eq!(s.account("bob").unwrap().available_raw, "0");
+        assert_eq!(s.fee_position().unwrap().pending_raw, "0");
+        assert!(s.records(CLIENT).unwrap().is_empty());
+    }
+
+    #[test]
+    fn transfer_id_cannot_be_reused_with_different_parameters() {
+        let s = SqliteRetailStore::open(":memory:").unwrap();
+        s.activate_inventory(10_000_000).unwrap();
+        s.purchase("purchase", CLIENT, 100, "x", 1).unwrap();
+        s.transfer(posting("transfer", CLIENT, "bob", 500_000))
+            .unwrap();
+        assert!(matches!(
+            s.transfer(posting("transfer", CLIENT, "carol", 500_000)),
+            Err(RetailError::IdempotencyConflict)
+        ));
     }
 }

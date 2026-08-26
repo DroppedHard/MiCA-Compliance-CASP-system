@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS custody_reconciliation_snapshots (
     customer_available_raw INTEGER,
     customer_locked_raw INTEGER,
     inventory_available_raw INTEGER,
+    pending_fee_raw INTEGER,
     custody_total_raw INTEGER,
     obligation_total_raw INTEGER,
     difference_raw INTEGER,

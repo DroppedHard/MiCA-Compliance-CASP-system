@@ -1,5 +1,5 @@
 use crate::reconciliation::ReconciliationService;
-use crate::retail::{ClientAccount, RetailOrder, ServiceRecord};
+use crate::retail::{ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord};
 use alloy::primitives::Address;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -37,6 +37,17 @@ pub trait RetailStore: Send + Sync {
     fn complete_redemption(&self, id: &str, tx: Option<&str>) -> Result<RetailOrder, RetailError>;
     fn fail_redemption(&self, id: &str, message: &str) -> Result<(), RetailError>;
     fn records(&self, client: &str) -> Result<Vec<ServiceRecord>, RetailError>;
+    fn transfer(&self, command: TransferPosting<'_>) -> Result<InternalTransfer, RetailError>;
+    fn fee_position(&self) -> Result<FeePosition, RetailError>;
+}
+pub struct TransferPosting<'a> {
+    pub id: &'a str,
+    pub sender: &'a str,
+    pub recipient: &'a str,
+    pub gross_raw: u64,
+    pub purpose: &'a str,
+    pub contract: &'a str,
+    pub chain: u64,
 }
 #[derive(Debug, Clone)]
 pub struct IssuerRedemption {
@@ -94,6 +105,55 @@ impl RetailService {
     pub fn records(&self, client: &str) -> Result<Vec<ServiceRecord>, RetailError> {
         validate_client(client)?;
         self.store.records(client)
+    }
+    pub fn fee_position(&self) -> Result<FeePosition, RetailError> {
+        self.store.fee_position()
+    }
+    pub async fn transfer(
+        &self,
+        sender: &str,
+        recipient: &str,
+        id: &str,
+        gross_raw: u64,
+        purpose: &str,
+    ) -> Result<InternalTransfer, RetailError> {
+        validate_client(sender)?;
+        validate_client(recipient)?;
+        validate_id(id)?;
+        if sender == recipient {
+            return Err(RetailError::Invalid(
+                "sender and recipient must be different clients".into(),
+            ));
+        }
+        if gross_raw == 0 || !gross_raw.is_multiple_of(TOKEN_UNITS_PER_CENT) {
+            return Err(RetailError::Invalid(
+                "tokenAmountRaw must be positive and represent whole USD cents".into(),
+            ));
+        }
+        if purpose != "private_transfer" && purpose != "goods_or_services" {
+            return Err(RetailError::Invalid(
+                "purposeClassification must be private_transfer or goods_or_services".into(),
+            ));
+        }
+        let _guard = self.lock.lock().await;
+        self.reconciliation
+            .check()
+            .await
+            .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
+        let transfer = self.store.transfer(TransferPosting {
+            id,
+            sender,
+            recipient,
+            gross_raw,
+            purpose,
+            contract: &self.contract,
+            chain: self.chain,
+        })?;
+        self.reconciliation
+            .check()
+            .await
+            .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
+        Ok(transfer)
     }
     pub async fn purchase(
         &self,
@@ -406,5 +466,80 @@ mod tests {
             reconciliation.current().unwrap().status,
             crate::reconciliation::ReconciliationStatus::Balanced
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_self_transfer_before_any_ledger_change() {
+        let store = Arc::new(SqliteRetailStore::open(":memory:").unwrap());
+        store.activate_inventory(10_000_000).unwrap();
+        let service = RetailService::new(
+            store.clone(),
+            Arc::new(Issuer(AtomicUsize::new(0))),
+            Address::with_last_byte(2),
+            "0x1".into(),
+            31337,
+            Arc::new(ReconciliationService::new(
+                Arc::new(SqliteReconciliationStore::open(":memory:").unwrap()),
+                store.clone(),
+                Arc::new(Wallet {
+                    hot: 2_000_000,
+                    cold: 8_000_000,
+                }),
+                Address::with_last_byte(1),
+                Address::with_last_byte(2),
+                Address::with_last_byte(3),
+            )),
+        );
+        assert!(matches!(
+            service
+                .transfer("alice", "alice", "self", 100_000, "private_transfer")
+                .await,
+            Err(RetailError::Invalid(_))
+        ));
+        assert_eq!(store.fee_position().unwrap().pending_raw, "0");
+    }
+
+    #[tokio::test]
+    async fn concurrent_transfers_cannot_spend_the_same_balance_twice() {
+        let store = Arc::new(SqliteRetailStore::open(":memory:").unwrap());
+        store.activate_inventory(10_000_000).unwrap();
+        store
+            .purchase("purchase", "alice", 150, "0x1", 31337)
+            .unwrap();
+        let service = Arc::new(RetailService::new(
+            store.clone(),
+            Arc::new(Issuer(AtomicUsize::new(0))),
+            Address::with_last_byte(2),
+            "0x1".into(),
+            31337,
+            Arc::new(ReconciliationService::new(
+                Arc::new(SqliteReconciliationStore::open(":memory:").unwrap()),
+                store.clone(),
+                Arc::new(Wallet {
+                    hot: 2_000_000,
+                    cold: 8_000_000,
+                }),
+                Address::with_last_byte(1),
+                Address::with_last_byte(2),
+                Address::with_last_byte(3),
+            )),
+        ));
+        let first = service.clone();
+        let second = service.clone();
+        let (bob, carol) = tokio::join!(
+            async move {
+                first
+                    .transfer("alice", "bob", "to-bob", 1_000_000, "private_transfer")
+                    .await
+            },
+            async move {
+                second
+                    .transfer("alice", "carol", "to-carol", 1_000_000, "private_transfer")
+                    .await
+            }
+        );
+        assert_eq!(usize::from(bob.is_ok()) + usize::from(carol.is_ok()), 1);
+        assert_eq!(store.account("alice").unwrap().available_raw, "500000");
+        assert_eq!(store.fee_position().unwrap().pending_raw, "1000");
     }
 }

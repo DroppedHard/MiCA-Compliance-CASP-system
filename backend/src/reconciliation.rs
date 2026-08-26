@@ -26,6 +26,7 @@ pub struct ReconciliationSnapshot {
     pub customer_available_raw: Option<String>,
     pub customer_locked_raw: Option<String>,
     pub inventory_available_raw: Option<String>,
+    pub pending_fee_raw: Option<String>,
     pub custody_total_raw: Option<String>,
     pub obligation_total_raw: Option<String>,
     pub difference_raw: Option<String>,
@@ -131,7 +132,14 @@ impl ReconciliationService {
             sum.checked_add(account.locked_raw.parse::<u64>().map_err(numeric)?)
                 .ok_or_else(|| ReconciliationError::Unavailable("locked total overflow".into()))
         })?;
-        evaluate(&balances, available, locked, inventory)
+        let pending_fee = self
+            .ledger
+            .fee_position()
+            .map_err(|error| ReconciliationError::Unavailable(error.to_string()))?
+            .pending_raw
+            .parse::<u64>()
+            .map_err(numeric)?;
+        evaluate(&balances, available, locked, inventory, pending_fee)
     }
 }
 
@@ -140,6 +148,7 @@ pub fn evaluate(
     customer_available: u64,
     customer_locked: u64,
     inventory: u64,
+    pending_fee: u64,
 ) -> Result<ReconciliationSnapshot, ReconciliationError> {
     let hot = balances.hot_raw.parse::<u64>().map_err(numeric)?;
     let cold = balances.cold_raw.parse::<u64>().map_err(numeric)?;
@@ -150,12 +159,13 @@ pub fn evaluate(
     let obligations = customer_available
         .checked_add(customer_locked)
         .and_then(|value| value.checked_add(inventory))
+        .and_then(|value| value.checked_add(pending_fee))
         .ok_or_else(|| ReconciliationError::Unavailable("obligation total overflow".into()))?;
     let difference = i128::from(custody) - i128::from(obligations);
     let (status, reason) = if difference != 0 {
         (
             ReconciliationStatus::Blocked,
-            "hot and cold custody do not equal customer positions, locks and unallocated inventory",
+            "hot and cold custody do not equal customer positions, locks, unallocated inventory and pending CASP fees",
         )
     } else if custody > 0 && u128::from(hot) * 100 != u128::from(custody) * 20 {
         (
@@ -176,6 +186,7 @@ pub fn evaluate(
         customer_available_raw: Some(customer_available.to_string()),
         customer_locked_raw: Some(customer_locked.to_string()),
         inventory_available_raw: Some(inventory.to_string()),
+        pending_fee_raw: Some(pending_fee.to_string()),
         custody_total_raw: Some(custody.to_string()),
         obligation_total_raw: Some(obligations.to_string()),
         difference_raw: Some(difference.to_string()),
@@ -196,6 +207,7 @@ impl ReconciliationSnapshot {
             customer_available_raw: None,
             customer_locked_raw: None,
             inventory_available_raw: None,
+            pending_fee_raw: None,
             custody_total_raw: None,
             obligation_total_raw: None,
             difference_raw: None,
@@ -249,18 +261,18 @@ mod tests {
     #[test]
     fn classifies_balanced_warning_and_blocked_without_counting_corporate() {
         assert_eq!(
-            evaluate(&balances(2_000, 8_000), 3_000, 1_000, 6_000)
+            evaluate(&balances(2_000, 8_000), 3_000, 1_000, 6_000, 0)
                 .unwrap()
                 .status,
             ReconciliationStatus::Balanced
         );
         assert_eq!(
-            evaluate(&balances(1_000, 9_000), 3_000, 1_000, 6_000)
+            evaluate(&balances(1_000, 9_000), 3_000, 1_000, 6_000, 0)
                 .unwrap()
                 .status,
             ReconciliationStatus::Warning
         );
-        let blocked = evaluate(&balances(2_000, 7_999), 3_000, 1_000, 6_000).unwrap();
+        let blocked = evaluate(&balances(2_000, 7_999), 3_000, 1_000, 6_000, 0).unwrap();
         assert_eq!(blocked.status, ReconciliationStatus::Blocked);
         assert_eq!(blocked.difference_raw.as_deref(), Some("-1"));
     }

@@ -2,7 +2,7 @@ use crate::{
     application::{BootstrapError, BootstrapService},
     domain::{BootstrapOperation, WalletBalances},
     reconciliation::{ReconciliationService, ReconciliationSnapshot},
-    retail::{ClientAccount, RetailOrder, ServiceRecord},
+    retail::{ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord},
     retail_application::{RetailError, RetailService},
 };
 use axum::{
@@ -33,11 +33,13 @@ pub fn router(
         )
         .route("/api/v1/admin/wallets", get(wallets))
         .route("/api/v1/admin/reconciliation", get(get_reconciliation))
+        .route("/api/v1/admin/fees", get(fee_position))
         .route("/api/v1/clients", get(accounts))
         .route("/api/v1/clients/{client_id}/account", get(account))
         .route("/api/v1/clients/{client_id}/records", get(records))
         .route("/api/v1/clients/{client_id}/purchases", post(purchase))
         .route("/api/v1/clients/{client_id}/sales", post(sale))
+        .route("/api/v1/clients/{client_id}/transfers", post(transfer))
         .route("/api/v1/clients/{client_id}/redemptions", post(redemption))
         .with_state(AppState {
             service,
@@ -89,6 +91,9 @@ async fn records(
 ) -> Result<Json<Vec<ServiceRecord>>, RetailApiError> {
     s.retail.records(&client).map(Json).map_err(RetailApiError)
 }
+async fn fee_position(State(s): State<AppState>) -> Result<Json<FeePosition>, RetailApiError> {
+    s.retail.fee_position().map(Json).map_err(RetailApiError)
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PurchaseRequest {
@@ -100,6 +105,14 @@ struct PurchaseRequest {
 struct RedemptionRequest {
     operation_id: String,
     token_amount_raw: u64,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferRequest {
+    operation_id: String,
+    recipient_client_id: String,
+    token_amount_raw: u64,
+    purpose_classification: String,
 }
 async fn purchase(
     State(s): State<AppState>,
@@ -130,6 +143,23 @@ async fn redemption(
 ) -> Result<Json<RetailOrder>, RetailApiError> {
     s.retail
         .redeem(&client, &body.operation_id, body.token_amount_raw)
+        .await
+        .map(Json)
+        .map_err(RetailApiError)
+}
+async fn transfer(
+    State(s): State<AppState>,
+    Path(sender): Path<String>,
+    Json(body): Json<TransferRequest>,
+) -> Result<Json<InternalTransfer>, RetailApiError> {
+    s.retail
+        .transfer(
+            &sender,
+            &body.recipient_client_id,
+            &body.operation_id,
+            body.token_amount_raw,
+            &body.purpose_classification,
+        )
         .await
         .map(Json)
         .map_err(RetailApiError)

@@ -55,6 +55,7 @@ The service loads `.env` from this directory at startup. Existing shell environm
 | `CASP_COLD_ADDRESS` | yes | none | target cold custody wallet |
 | `RPC_URL` | no | `http://127.0.0.1:8545` | local Ethereum JSON-RPC |
 | `ISSUER_URL` | no | `http://127.0.0.1:3000` | issuer backend |
+| `ISSUER_PUBLIC_URL` | no | `http://127.0.0.1:5173` | issuer public frontend used for the white-paper link |
 | `MOCK_BANK_URL` | no | `http://127.0.0.1:3100` | issuer mockBank |
 | `CASP_HTTP_ADDRESS` | no | `127.0.0.1:3200` | CASP API listen address |
 | `CASP_DATABASE_PATH` | no | `data/casp.sqlite` | independent CASP SQLite database |
@@ -75,6 +76,18 @@ cargo run
 ```
 
 Never paste a real or funded private key into this demo.
+
+The customer token-information facade is available at `GET /api/v1/public/token-information`. It reads the issuer's token, asset-state and ESG APIs in parallel and returns their values with the issuer-owned white-paper URL. It does not access issuer storage or independently calculate those metrics.
+
+## Client statements
+
+Generate a deterministic statement from the CASP ledger with an inclusive UTC date range:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:3200/api/v1/clients/alice/statement?from=2026-08-01&to=2026-08-31"
+```
+
+Opening balance contains postings before `from`; closing balance contains postings through `to`. Available and locked positions are calculated independently. Operation metadata supplies labels and counterparties but never replaces ledger amounts.
 
 At startup the backend automatically resumes the idempotent initial purchase and does not open its HTTP port until the 10,000 rUSD pool is ready. The issuer backend, mockBank and Hardhat node must therefore already be running. The following endpoint remains available as a manual retry/inspection tool:
 

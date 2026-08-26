@@ -4,10 +4,12 @@ use crate::{
     inventory::{
         InventoryError, InventoryOperation, InventoryService, RebalancingPlan, rebalancing_plan,
     },
+    public_info::{PublicInfoError, PublicInfoService, TokenInformation},
     reconciliation::{ReconciliationService, ReconciliationSnapshot},
     reporting::{DailyTransactionReport, ReportingError, ReportingService},
     retail::{ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord},
     retail_application::{RetailError, RetailService},
+    statements::{ClientStatement, StatementError, StatementService},
 };
 use axum::{
     Json, Router,
@@ -25,6 +27,8 @@ struct AppState {
     reconciliation: Arc<ReconciliationService>,
     reporting: Arc<ReportingService>,
     inventory: Arc<InventoryService>,
+    public_info: Arc<PublicInfoService>,
+    statements: Arc<StatementService>,
 }
 pub fn router(
     service: Arc<BootstrapService>,
@@ -32,6 +36,8 @@ pub fn router(
     reconciliation: Arc<ReconciliationService>,
     reporting: Arc<ReportingService>,
     inventory: Arc<InventoryService>,
+    public_info: Arc<PublicInfoService>,
+    statements: Arc<StatementService>,
 ) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -53,6 +59,7 @@ pub fn router(
             post(amend_record).get(amendments),
         )
         .route("/api/v1/reports/daily-transactions", get(daily_report))
+        .route("/api/v1/public/token-information", get(token_information))
         .route("/api/v1/clients", get(accounts))
         .route("/api/v1/clients/{client_id}/account", get(account))
         .route("/api/v1/clients/{client_id}/records", get(records))
@@ -60,13 +67,43 @@ pub fn router(
         .route("/api/v1/clients/{client_id}/sales", post(sale))
         .route("/api/v1/clients/{client_id}/transfers", post(transfer))
         .route("/api/v1/clients/{client_id}/redemptions", post(redemption))
+        .route(
+            "/api/v1/clients/{client_id}/statement",
+            get(client_statement),
+        )
         .with_state(AppState {
             service,
             retail,
             reconciliation,
             reporting,
             inventory,
+            public_info,
+            statements,
         })
+}
+#[derive(Deserialize)]
+struct StatementQuery {
+    from: String,
+    to: String,
+}
+async fn client_statement(
+    State(s): State<AppState>,
+    Path(client): Path<String>,
+    Query(query): Query<StatementQuery>,
+) -> Result<Json<ClientStatement>, StatementApiError> {
+    s.statements
+        .generate(&client, &query.from, &query.to)
+        .map(Json)
+        .map_err(StatementApiError)
+}
+async fn token_information(
+    State(s): State<AppState>,
+) -> Result<Json<TokenInformation>, PublicInfoApiError> {
+    s.public_info
+        .information()
+        .await
+        .map(Json)
+        .map_err(PublicInfoApiError)
 }
 
 #[derive(Deserialize)]
@@ -338,6 +375,36 @@ impl IntoResponse for InventoryApiError {
             }
             InventoryError::Bootstrap(_) => StatusCode::BAD_GATEWAY,
             InventoryError::Overflow | InventoryError::Storage(_) | InventoryError::Ledger(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        (
+            status,
+            Json(ErrorBody {
+                error: self.0.to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+struct PublicInfoApiError(PublicInfoError);
+impl IntoResponse for PublicInfoApiError {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorBody {
+                error: self.0.to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+struct StatementApiError(StatementError);
+impl IntoResponse for StatementApiError {
+    fn into_response(self) -> Response {
+        let status = match self.0 {
+            StatementError::InvalidClient | StatementError::InvalidRange => StatusCode::BAD_REQUEST,
+            StatementError::Overflow | StatementError::Storage(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };

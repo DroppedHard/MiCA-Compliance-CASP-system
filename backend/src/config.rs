@@ -7,6 +7,7 @@ pub struct Config {
     pub http_address: SocketAddr,
     pub database_path: String,
     pub issuer_url: String,
+    pub issuer_public_url: String,
     pub mock_bank_url: String,
     pub rpc_url: String,
     pub token_address: Address,
@@ -38,6 +39,8 @@ impl Config {
                 .unwrap_or_else(|_| "data/casp.sqlite".to_owned()),
             issuer_url: env::var("ISSUER_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned()),
+            issuer_public_url: env::var("ISSUER_PUBLIC_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:5173".to_owned()),
             mock_bank_url: env::var("MOCK_BANK_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3100".to_owned()),
             rpc_url: env::var("RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8545".to_owned()),

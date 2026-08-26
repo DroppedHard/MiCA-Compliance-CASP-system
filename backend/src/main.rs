@@ -3,13 +3,16 @@ use casp_backend::{
     application::{BootstrapService, PURCHASE_TOKEN_RAW},
     config::Config,
     infrastructure::{
-        AlloyWalletGateway, HttpBankGateway, HttpIssuerGateway, SqliteBootstrapStore,
-        SqliteInventoryStore, SqliteReconciliationStore, SqliteReportingStore, SqliteRetailStore,
+        AlloyWalletGateway, HttpBankGateway, HttpIssuerGateway, HttpIssuerPublicGateway,
+        SqliteBootstrapStore, SqliteInventoryStore, SqliteReconciliationStore,
+        SqliteReportingStore, SqliteRetailStore, SqliteStatementStore,
     },
     inventory::InventoryService,
+    public_info::PublicInfoService,
     reconciliation::ReconciliationService,
     reporting::ReportingService,
     retail_application::RetailService,
+    statements::StatementService,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -75,6 +78,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         c.hot_address,
         c.cold_address,
     ));
+    let public_info = Arc::new(PublicInfoService::new(Arc::new(
+        HttpIssuerPublicGateway::new(&c.issuer_url, &c.issuer_public_url),
+    )));
+    let statements = Arc::new(StatementService::new(Arc::new(SqliteStatementStore::open(
+        &c.database_path,
+    )?)));
     // A CASP cannot allocate customer entitlements before it owns the matching
     // rUSD pool. Resume the idempotent 10,000 rUSD bootstrap on every startup;
     // completed boundaries are read from SQLite and are never executed twice.
@@ -92,7 +101,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(address=%c.http_address,"CASP HTTP server started");
     axum::serve(
         listener,
-        api::router(service, retail, reconciliation, reporting, inventory),
+        api::router(
+            service,
+            retail,
+            reconciliation,
+            reporting,
+            inventory,
+            public_info,
+            statements,
+        ),
     )
     .await?;
     Ok(())

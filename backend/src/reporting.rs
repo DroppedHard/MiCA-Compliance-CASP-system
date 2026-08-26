@@ -177,7 +177,7 @@ fn checked_add(left: u64, right: u64) -> Result<u64, ReportingError> {
     left.checked_add(right).ok_or(ReportingError::Overflow)
 }
 
-fn validate_date(value: &str) -> Result<(), ReportingError> {
+pub(crate) fn validate_date(value: &str) -> Result<(), ReportingError> {
     let bytes = value.as_bytes();
     let shape = bytes.len() == 10
         && bytes[4] == b'-'

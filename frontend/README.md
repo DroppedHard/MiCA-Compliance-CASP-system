@@ -21,6 +21,8 @@ Before the first retail purchase, initialize CASP inventory with the admin boots
 
 The administrator route polls the CASP backend every 10 seconds. It presents custody reconciliation, hot/cold/corporate wallet balances, customer liabilities, pending CASP fees, unallocated inventory, issuer bootstrap state, recent service records and the last seven days of transaction-reporting aggregates.
 
+The same route contains the demo-only manual inventory form. It lets an administrator choose a USD amount, follows the persisted issuer purchase operation and refreshes custody, inventory and the advisory 20/80 rebalancing plan after completion. Automatic inventory replenishment is not enabled.
+
 An internal transfer debits the gross amount from the selected sender, assigns the net amount to another demo customer and accrues a 0.1% demo transaction fee. It is an atomic, gas-free SQLite operation; it does not move tokens between blockchain wallets.
 
 ## Verify

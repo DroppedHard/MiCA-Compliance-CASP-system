@@ -12,11 +12,12 @@ export function AdminDashboard(){
   const records=useQuery({queryKey:["admin","records"],queryFn:async()=>{
     const clients=await api.accounts()
     const clientRecords=await Promise.all(clients.map(account=>api.records(account.clientId)))
-    return clientRecords.flat().sort((left,right)=>right.createdAtUnixMs-left.createdAtUnixMs)
+    return [...new Map(clientRecords.flat().map(record=>[record.recordId,record])).values()].sort((left,right)=>right.createdAtUnixMs-left.createdAtUnixMs)
   },refetchInterval:10_000})
+  const fees=useQuery({queryKey:["admin","fees"],queryFn:api.fees,refetchInterval:10_000})
   const bootstrap=useQuery({queryKey:["admin","bootstrap"],queryFn:api.bootstrapStatus,refetchInterval:10_000})
   const state=reconciliation.data?.status
-  const error=reconciliation.error??wallets.error??accounts.error??records.error??bootstrap.error
+  const error=reconciliation.error??wallets.error??accounts.error??records.error??fees.error??bootstrap.error
   const failedRecords=records.data?.filter(record=>isFailure(record.status))??[]
 
   return <main>
@@ -30,7 +31,7 @@ export function AdminDashboard(){
       <AdminMetric icon={CircleDollarSign} label="Różnica custody" value={formatSigned(reconciliation.data?.differenceRaw)} detail={`Blok dowodowy: ${reconciliation.data?.evidenceBlock??"—"}`}/>
     </section>
     <div className="admin-grid">
-      <section className="card"><h2>Zobowiązania i inventory</h2><div className="breakdown"><Row label="Dostępne pozycje klientów" value={formatRaw(reconciliation.data?.customerAvailableRaw)}/><Row label="Pozycje zablokowane" value={formatRaw(reconciliation.data?.customerLockedRaw)}/><Row label="Nieprzypisany zapas" value={formatRaw(reconciliation.data?.inventoryAvailableRaw)}/><Row label="Łączne zobowiązanie" value={formatRaw(reconciliation.data?.obligationTotalRaw)} strong/><Row label="Hot + cold" value={formatRaw(reconciliation.data?.custodyTotalRaw)} strong/></div><p className="policy-note">{reconciliation.data?.policyVersion??"casp-custody-reconciliation-v1"} · ostatnia kontrola {reconciliation.data?new Date(reconciliation.data.checkedAtUnixMs).toLocaleString("pl-PL"):"—"}</p></section>
+      <section className="card"><h2>Zobowiązania i inventory</h2><div className="breakdown"><Row label="Dostępne pozycje klientów" value={formatRaw(reconciliation.data?.customerAvailableRaw)}/><Row label="Pozycje zablokowane" value={formatRaw(reconciliation.data?.customerLockedRaw)}/><Row label="Nieprzypisany zapas" value={formatRaw(reconciliation.data?.inventoryAvailableRaw)}/><Row label="Prowizje oczekujące na sweep" value={formatRaw(fees.data?.pendingRaw)}/><Row label="Łączne zobowiązanie" value={formatRaw(reconciliation.data?.obligationTotalRaw)} strong/><Row label="Hot + cold" value={formatRaw(reconciliation.data?.custodyTotalRaw)} strong/></div><p className="policy-note">{reconciliation.data?.policyVersion??"casp-custody-reconciliation-v1"} · ostatnia kontrola {reconciliation.data?new Date(reconciliation.data.checkedAtUnixMs).toLocaleString("pl-PL"):"—"}</p></section>
       <section className="card"><h2>Integracja z emitentem</h2><div className="integration-status"><Server/><div><strong>{bootstrap.data?.status??"brak danych"}</strong><p className="hint">Operacja początkowego zakupu: {bootstrap.data?.operationId??"—"}</p></div></div>{bootstrap.data?.lastError?<p className="error">{bootstrap.data.lastError}</p>:failedRecords.length?<p className="error">Wykryto nieudane operacje: {failedRecords.length}</p>:<p className="success">Brak zgłoszonych błędów procesów.</p>}<p className="hint">Hash emisji: {shortHash(bootstrap.data?.issuerTransactionHash)}</p></section>
     </div>
     <section className="card history"><h2>Mapa klientów i custody</h2><p className="hint">Wizualizacja pochodzi z pozycji ledgeru. Źródłem decyzji o pokryciu pozostaje backendowa rekonsyliacja.</p><div className="custody-graph"><div className="graph-wallet">HOT + COLD<strong>{formatRaw(reconciliation.data?.custodyTotalRaw)}</strong></div><div className="graph-line"/><div className="client-nodes">{accounts.data?.map(account=><div className="client-node" key={account.clientId}><Users/><span>{names[account.clientId]??account.clientId}</span><strong>{rawToRusd(account.availableRaw)} rUSD</strong><small>Zablokowane: {rawToRusd(account.lockedRaw)}</small></div>)}</div></div></section>

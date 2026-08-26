@@ -12,7 +12,14 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Open `http://127.0.0.1:5174`. Before the first retail purchase, initialize CASP inventory with the admin bootstrap endpoint described in `../backend/README.md`.
+Open one of the routes:
+
+- `http://127.0.0.1:5174/` — customer purchase and sale demo;
+- `http://127.0.0.1:5174/admin` — unauthenticated, read-only administrator demo.
+
+Before the first retail purchase, initialize CASP inventory with the admin bootstrap endpoint described in `../backend/README.md`.
+
+The administrator route polls the CASP backend every 10 seconds. It presents custody reconciliation, hot/cold/corporate wallet balances, customer liabilities, unallocated inventory, issuer bootstrap state and recent service records. Daily regulatory aggregates remain intentionally absent until the reporting integration described in roadmap item 8 is implemented.
 
 ## Verify
 
@@ -20,7 +27,3 @@ Open `http://127.0.0.1:5174`. Before the first retail purchase, initialize CASP 
 npm.cmd test
 npm.cmd run build
 ```
-
-Implementation placeholder. One React application will contain separate customer and administrator routes.
-
-The existing customer mock remains temporarily at `/client` in `issuer/frontend` so the working demo is not duplicated during the folder move. It will be migrated here when the CASP routing and backend boundary are implemented.

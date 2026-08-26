@@ -2,12 +2,13 @@ use crate::{
     application::{BootstrapError, BootstrapService},
     domain::{BootstrapOperation, WalletBalances},
     reconciliation::{ReconciliationService, ReconciliationSnapshot},
+    reporting::{DailyTransactionReport, ReportingError, ReportingService},
     retail::{ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord},
     retail_application::{RetailError, RetailService},
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -19,11 +20,13 @@ struct AppState {
     service: Arc<BootstrapService>,
     retail: Arc<RetailService>,
     reconciliation: Arc<ReconciliationService>,
+    reporting: Arc<ReportingService>,
 }
 pub fn router(
     service: Arc<BootstrapService>,
     retail: Arc<RetailService>,
     reconciliation: Arc<ReconciliationService>,
+    reporting: Arc<ReportingService>,
 ) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -34,6 +37,7 @@ pub fn router(
         .route("/api/v1/admin/wallets", get(wallets))
         .route("/api/v1/admin/reconciliation", get(get_reconciliation))
         .route("/api/v1/admin/fees", get(fee_position))
+        .route("/api/v1/reports/daily-transactions", get(daily_report))
         .route("/api/v1/clients", get(accounts))
         .route("/api/v1/clients/{client_id}/account", get(account))
         .route("/api/v1/clients/{client_id}/records", get(records))
@@ -45,7 +49,23 @@ pub fn router(
             service,
             retail,
             reconciliation,
+            reporting,
         })
+}
+#[derive(Deserialize)]
+struct DailyReportQuery {
+    from: String,
+    to: String,
+}
+async fn daily_report(
+    State(state): State<AppState>,
+    Query(query): Query<DailyReportQuery>,
+) -> Result<Json<DailyTransactionReport>, ReportingApiError> {
+    state
+        .reporting
+        .daily(&query.from, &query.to)
+        .map(Json)
+        .map_err(ReportingApiError)
 }
 async fn get_reconciliation(
     State(state): State<AppState>,
@@ -201,6 +221,26 @@ impl IntoResponse for RetailApiError {
             RetailError::Issuer(_) => StatusCode::BAD_GATEWAY,
             RetailError::Reconciliation(_) => StatusCode::SERVICE_UNAVAILABLE,
             RetailError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (
+            status,
+            Json(ErrorBody {
+                error: self.0.to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+struct ReportingApiError(ReportingError);
+impl IntoResponse for ReportingApiError {
+    fn into_response(self) -> Response {
+        let status = match self.0 {
+            ReportingError::InvalidDateRange | ReportingError::InvalidAmount => {
+                StatusCode::BAD_REQUEST
+            }
+            ReportingError::Overflow | ReportingError::Storage(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         (
             status,

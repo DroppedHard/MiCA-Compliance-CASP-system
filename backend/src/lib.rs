@@ -4,5 +4,6 @@ pub mod config;
 pub mod domain;
 pub mod infrastructure;
 pub mod reconciliation;
+pub mod reporting;
 pub mod retail;
 pub mod retail_application;

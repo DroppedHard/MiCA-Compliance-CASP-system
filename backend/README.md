@@ -108,6 +108,7 @@ Calling the POST endpoint again returns the existing completed operation and doe
 - `GET /api/v1/admin/wallets`
 - `GET /api/v1/admin/reconciliation`
 - `GET /api/v1/admin/fees`
+- `GET /api/v1/reports/daily-transactions?from=YYYY-MM-DD&to=YYYY-MM-DD`
 - `GET /api/v1/clients`
 - `GET /api/v1/clients/{clientId}/account`
 - `GET /api/v1/clients/{clientId}/records`
@@ -147,6 +148,8 @@ Invoke-RestMethod -Method Post -ContentType application/json -Body $body http://
 ```
 
 The sender is debited by the gross amount. The recipient receives 99.9%, while the 0.1% demo transaction fee is posted to `fee_position.pending_raw`. The three postings and the audit records share one SQLite transaction. No Ethereum transaction or gas fee is involved. Until a future on-chain sweep moves accrued fees to the corporate wallet, pending fees remain included in hot/cold custody obligations.
+
+The daily-report endpoint projects immutable retail orders and internal transfers without deleting or rewriting the source records. It returns total activity separately from the `goods_or_services` subset used as the demo estimate of use as a means of exchange. Fiat purchase, sale and redemption activity is classified as `exchange_for_funds` and excluded from that subset. The payload also identifies known on-chain overlap, methodology versions and the explicit demo USD/EUR 1:1 conversion.
 
 ## Verification
 

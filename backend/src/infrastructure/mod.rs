@@ -1,4 +1,7 @@
 mod ethereum;
+mod external_deposit_ethereum;
+mod external_deposit_sqlite;
+mod fee_sweep_sqlite;
 mod http;
 mod inventory_sqlite;
 mod reconciliation_sqlite;
@@ -7,6 +10,9 @@ mod retail_sqlite;
 mod sqlite;
 mod statement_sqlite;
 pub use ethereum::AlloyWalletGateway;
+pub use external_deposit_ethereum::AlloyExternalDepositGateway;
+pub use external_deposit_sqlite::SqliteExternalDepositStore;
+pub use fee_sweep_sqlite::SqliteFeeSweepStore;
 pub use http::{HttpBankGateway, HttpIssuerGateway, HttpIssuerPublicGateway};
 pub use inventory_sqlite::SqliteInventoryStore;
 pub use reconciliation_sqlite::SqliteReconciliationStore;

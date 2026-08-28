@@ -50,6 +50,9 @@ The service loads `.env` from this directory at startup. Existing shell environm
 | --- | --- | --- | --- |
 | `TOKEN_ADDRESS` | yes | none | deployed `ResearchUsdEMT` |
 | `CASP_CORPORATE_PRIVATE_KEY` | yes | none | disposable local signer for the corporate wallet |
+| `CASP_HOT_PRIVATE_KEY` | yes | none | disposable local signer used only for custody-to-corporate fee sweeps |
+| `CASP_DEPOSIT_ROUTER_ADDRESS` | yes | none | shared router emitting attributable external-deposit events |
+| `CASP_DEPOSIT_CONFIRMATIONS` | no | `2` | blocks required before crediting an external deposit |
 | `CASP_CORPORATE_ADDRESS` | yes | none | wallet receiving the issuer mint |
 | `CASP_HOT_ADDRESS` | yes | none | target hot custody wallet |
 | `CASP_COLD_ADDRESS` | yes | none | target cold custody wallet |
@@ -121,6 +124,7 @@ Calling the POST endpoint again returns the existing completed operation and doe
 - `GET /api/v1/admin/wallets`
 - `GET /api/v1/admin/reconciliation`
 - `GET /api/v1/admin/fees`
+- `POST /api/v1/admin/fee-sweeps` with `{ "operationId": "unique-id" }` transfers all currently pending rUSD fees from hot custody to the corporate wallet. The operation requires `CASP_HOT_PRIVATE_KEY`, records the transaction hash, debits the pending fee ledger only after chain confirmation and re-runs custody reconciliation.
 - `GET /api/v1/reports/daily-transactions?from=YYYY-MM-DD&to=YYYY-MM-DD`
 - `GET /api/v1/clients`
 - `GET /api/v1/clients/{clientId}/account`
@@ -191,7 +195,9 @@ $body = @{
 Invoke-RestMethod -Method Post -ContentType application/json -Body $body http://127.0.0.1:3200/api/v1/clients/alice/transfers
 ```
 
-The sender is debited by the gross amount. The recipient receives 99.9%, while the 0.1% demo transaction fee is posted to `fee_position.pending_raw`. The three postings and the audit records share one SQLite transaction. No Ethereum transaction or gas fee is involved. Until a future on-chain sweep moves accrued fees to the corporate wallet, pending fees remain included in hot/cold custody obligations.
+The sender is debited by the gross amount. The recipient receives 99.9%, while the 0.1% demo transaction fee is posted to `fee_position.pending_raw`. The three postings and the audit records share one SQLite transaction. No Ethereum transaction or gas fee is involved in the customer transfer. Until an administrator runs the on-chain fee sweep, pending fees remain included in hot/cold custody obligations.
+
+Each seeded customer has a stable logical receiving reference (`rusd:casp:alice`, `rusd:casp:bob`, `rusd:casp:carol`). Internal transfers may use it in `recipientClientId`. For an external deposit, the sender passes its `keccak256` to the shared `CaspDepositRouter`. After the configured confirmation depth, the observer credits the matching customer exactly once. These identifiers are public ledger aliases, not blockchain wallets or secret keys.
 
 The daily-report endpoint projects immutable retail orders and internal transfers without deleting or rewriting the source records. It returns total activity separately from the `goods_or_services` subset used as the demo estimate of use as a means of exchange. Fiat purchase, sale and redemption activity is classified as `exchange_for_funds` and excluded from that subset. The payload also identifies known on-chain overlap, methodology versions and the explicit demo USD/EUR 1:1 conversion.
 

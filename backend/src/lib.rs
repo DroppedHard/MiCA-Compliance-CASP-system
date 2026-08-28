@@ -2,6 +2,8 @@ pub mod api;
 pub mod application;
 pub mod config;
 pub mod domain;
+pub mod external_deposits;
+pub mod fee_sweep;
 pub mod infrastructure;
 pub mod inventory;
 pub mod public_info;

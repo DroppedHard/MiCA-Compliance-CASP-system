@@ -11,7 +11,10 @@ pub struct Config {
     pub mock_bank_url: String,
     pub rpc_url: String,
     pub token_address: Address,
+    pub deposit_router_address: Address,
+    pub deposit_confirmations: u64,
     pub corporate_private_key: String,
+    pub hot_private_key: String,
     pub corporate_address: Address,
     pub hot_address: Address,
     pub cold_address: Address,
@@ -45,7 +48,13 @@ impl Config {
                 .unwrap_or_else(|_| "http://127.0.0.1:3100".to_owned()),
             rpc_url: env::var("RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8545".to_owned()),
             token_address: address("TOKEN_ADDRESS")?,
+            deposit_router_address: address("CASP_DEPOSIT_ROUTER_ADDRESS")?,
+            deposit_confirmations: env::var("CASP_DEPOSIT_CONFIRMATIONS")
+                .unwrap_or_else(|_| "2".into())
+                .parse()
+                .map_err(|_| ConfigError::ChainId)?,
             corporate_private_key: required("CASP_CORPORATE_PRIVATE_KEY")?,
+            hot_private_key: required("CASP_HOT_PRIVATE_KEY")?,
             corporate_address: address("CASP_CORPORATE_ADDRESS")?,
             hot_address: address("CASP_HOT_ADDRESS")?,
             cold_address: address("CASP_COLD_ADDRESS")?,

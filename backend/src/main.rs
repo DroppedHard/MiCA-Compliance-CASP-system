@@ -2,10 +2,13 @@ use casp_backend::{
     api,
     application::{BootstrapService, PURCHASE_TOKEN_RAW},
     config::Config,
+    external_deposits::ExternalDepositObserver,
+    fee_sweep::FeeSweepService,
     infrastructure::{
-        AlloyWalletGateway, HttpBankGateway, HttpIssuerGateway, HttpIssuerPublicGateway,
-        SqliteBootstrapStore, SqliteInventoryStore, SqliteReconciliationStore,
-        SqliteReportingStore, SqliteRetailStore, SqliteStatementStore,
+        AlloyExternalDepositGateway, AlloyWalletGateway, HttpBankGateway, HttpIssuerGateway,
+        HttpIssuerPublicGateway, SqliteBootstrapStore, SqliteExternalDepositStore,
+        SqliteFeeSweepStore, SqliteInventoryStore, SqliteReconciliationStore, SqliteReportingStore,
+        SqliteRetailStore, SqliteStatementStore,
     },
     inventory::InventoryService,
     public_info::PublicInfoService,
@@ -33,6 +36,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             c.token_address,
             &c.corporate_private_key,
             c.corporate_address,
+        )
+        .await?,
+    );
+    let hot_wallet = Arc::new(
+        AlloyWalletGateway::connect_for_role(
+            &c.rpc_url,
+            c.token_address,
+            &c.hot_private_key,
+            c.hot_address,
+            "hot",
         )
         .await?,
     );
@@ -84,6 +97,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let statements = Arc::new(StatementService::new(Arc::new(SqliteStatementStore::open(
         &c.database_path,
     )?)));
+    let fee_sweeps = Arc::new(FeeSweepService::new(
+        Arc::new(SqliteFeeSweepStore::open(&c.database_path)?),
+        hot_wallet,
+        reconciliation.clone(),
+        c.corporate_address,
+    ));
+    let deposit_observer = ExternalDepositObserver::new(
+        Arc::new(
+            AlloyExternalDepositGateway::connect(
+                &c.rpc_url,
+                c.deposit_router_address,
+                c.deposit_confirmations,
+            )
+            .await?,
+        ),
+        Arc::new(SqliteExternalDepositStore::open(&c.database_path)?),
+        reconciliation.clone(),
+        c.chain_id,
+    );
     // A CASP cannot allocate customer entitlements before it owns the matching
     // rUSD pool. Resume the idempotent 10,000 rUSD bootstrap on every startup;
     // completed boundaries are read from SQLite and are never executed twice.
@@ -96,12 +128,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .clone()
             .run(std::time::Duration::from_secs(300)),
     );
+    tokio::spawn(deposit_observer.run(std::time::Duration::from_secs(5)));
     info!(operation_id=%bootstrap.operation_id,status=?bootstrap.status,"CASP initial inventory is ready");
     let listener = TcpListener::bind(c.http_address).await?;
     info!(address=%c.http_address,"CASP HTTP server started");
     axum::serve(
         listener,
-        api::router(
+        api::router(api::RouterDependencies {
             service,
             retail,
             reconciliation,
@@ -109,7 +142,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             inventory,
             public_info,
             statements,
-        ),
+            fee_sweeps,
+        }),
     )
     .await?;
     Ok(())

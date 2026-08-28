@@ -1,6 +1,7 @@
 use crate::{
     application::{BootstrapError, BootstrapService},
     domain::{BootstrapOperation, WalletBalances},
+    fee_sweep::{FeeSweep, FeeSweepError, FeeSweepService},
     inventory::{
         InventoryError, InventoryOperation, InventoryService, RebalancingPlan, rebalancing_plan,
     },
@@ -29,16 +30,30 @@ struct AppState {
     inventory: Arc<InventoryService>,
     public_info: Arc<PublicInfoService>,
     statements: Arc<StatementService>,
+    fee_sweeps: Arc<FeeSweepService>,
 }
-pub fn router(
-    service: Arc<BootstrapService>,
-    retail: Arc<RetailService>,
-    reconciliation: Arc<ReconciliationService>,
-    reporting: Arc<ReportingService>,
-    inventory: Arc<InventoryService>,
-    public_info: Arc<PublicInfoService>,
-    statements: Arc<StatementService>,
-) -> Router {
+pub struct RouterDependencies {
+    pub service: Arc<BootstrapService>,
+    pub retail: Arc<RetailService>,
+    pub reconciliation: Arc<ReconciliationService>,
+    pub reporting: Arc<ReportingService>,
+    pub inventory: Arc<InventoryService>,
+    pub public_info: Arc<PublicInfoService>,
+    pub statements: Arc<StatementService>,
+    pub fee_sweeps: Arc<FeeSweepService>,
+}
+
+pub fn router(dependencies: RouterDependencies) -> Router {
+    let RouterDependencies {
+        service,
+        retail,
+        reconciliation,
+        reporting,
+        inventory,
+        public_info,
+        statements,
+        fee_sweeps,
+    } = dependencies;
     Router::new()
         .route("/health", get(health))
         .route(
@@ -48,6 +63,7 @@ pub fn router(
         .route("/api/v1/admin/wallets", get(wallets))
         .route("/api/v1/admin/reconciliation", get(get_reconciliation))
         .route("/api/v1/admin/fees", get(fee_position))
+        .route("/api/v1/admin/fee-sweeps", post(execute_fee_sweep))
         .route(
             "/api/v1/admin/inventory-replenishments",
             post(replenish).get(replenishments),
@@ -79,7 +95,26 @@ pub fn router(
             inventory,
             public_info,
             statements,
+            fee_sweeps,
         })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeeSweepRequest {
+    operation_id: String,
+}
+
+async fn execute_fee_sweep(
+    State(state): State<AppState>,
+    Json(body): Json<FeeSweepRequest>,
+) -> Result<Json<FeeSweep>, FeeSweepApiError> {
+    state
+        .fee_sweeps
+        .execute(&body.operation_id)
+        .await
+        .map(Json)
+        .map_err(FeeSweepApiError)
 }
 #[derive(Deserialize)]
 struct StatementQuery {
@@ -334,6 +369,27 @@ impl IntoResponse for RetailApiError {
             RetailError::Issuer(_) => StatusCode::BAD_GATEWAY,
             RetailError::Reconciliation(_) => StatusCode::SERVICE_UNAVAILABLE,
             RetailError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (
+            status,
+            Json(ErrorBody {
+                error: self.0.to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+struct FeeSweepApiError(FeeSweepError);
+impl IntoResponse for FeeSweepApiError {
+    fn into_response(self) -> Response {
+        let status = match self.0 {
+            FeeSweepError::InvalidOperationId => StatusCode::BAD_REQUEST,
+            FeeSweepError::NoPendingFees
+            | FeeSweepError::IdempotencyConflict
+            | FeeSweepError::InsufficientHotBalance => StatusCode::CONFLICT,
+            FeeSweepError::Wallet(_) | FeeSweepError::Reconciliation(_) => StatusCode::BAD_GATEWAY,
+            FeeSweepError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,

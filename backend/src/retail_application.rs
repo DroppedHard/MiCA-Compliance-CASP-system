@@ -18,6 +18,7 @@ pub trait RetailStore: Send + Sync {
     ) -> Result<(), RetailError>;
     fn account(&self, client: &str) -> Result<ClientAccount, RetailError>;
     fn accounts(&self) -> Result<Vec<ClientAccount>, RetailError>;
+    fn client_id_by_wallet(&self, wallet_address: &str) -> Result<Option<String>, RetailError>;
     fn purchase(
         &self,
         id: &str,
@@ -155,9 +156,15 @@ impl RetailService {
         purpose: &str,
     ) -> Result<InternalTransfer, RetailError> {
         validate_client(sender)?;
-        validate_client(recipient)?;
+        let recipient_id = match self.store.client_id_by_wallet(recipient)? {
+            Some(client_id) => client_id,
+            None => {
+                validate_client(recipient)?;
+                recipient.to_owned()
+            }
+        };
         validate_id(id)?;
-        if sender == recipient {
+        if sender == recipient_id {
             return Err(RetailError::Invalid(
                 "sender and recipient must be different clients".into(),
             ));
@@ -180,7 +187,7 @@ impl RetailService {
         let transfer = self.store.transfer(TransferPosting {
             id,
             sender,
-            recipient,
+            recipient: &recipient_id,
             gross_raw,
             purpose,
             contract: &self.contract,

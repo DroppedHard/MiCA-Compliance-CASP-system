@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct ClientAccount {
     pub client_id: String,
+    pub wallet_address: String,
     pub available_raw: String,
     pub locked_raw: String,
     pub inventory_available_raw: String,

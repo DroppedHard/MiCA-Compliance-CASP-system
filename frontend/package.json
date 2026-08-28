@@ -5,5 +5,5 @@
   "type": "module",
   "scripts": { "dev": "vite", "build": "tsc -b && vite build", "test": "vitest run" },
   "dependencies": { "@tanstack/react-query": "^5.101.4", "effect": "^3.22.1", "lucide-react": "latest", "react": "^19.2.8", "react-dom": "^19.2.8" },
-  "devDependencies": { "@types/react": "latest", "@types/react-dom": "latest", "@vitejs/plugin-react": "latest", "typescript": "latest", "vite": "^8.2.2", "vitest": "latest" }
+  "devDependencies": { "@types/node": "latest", "@types/react": "latest", "@types/react-dom": "latest", "@vitejs/plugin-react": "latest", "typescript": "latest", "vite": "^8.2.2", "vitest": "latest" }
 }

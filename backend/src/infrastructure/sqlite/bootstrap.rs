@@ -19,7 +19,7 @@ impl SqliteBootstrapStore {
         }
         let connection = Connection::open(path).map_err(storage)?;
         connection
-            .execute_batch(include_str!("../../migrations/0001_bootstrap.sql"))
+            .execute_batch(include_str!("../../../migrations/0001_bootstrap.sql"))
             .map_err(storage)?;
         Ok(Self {
             connection: Mutex::new(connection),

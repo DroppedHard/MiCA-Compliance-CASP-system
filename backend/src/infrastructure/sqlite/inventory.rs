@@ -16,7 +16,7 @@ impl SqliteInventoryStore {
         let connection = Connection::open(path).map_err(storage)?;
         connection
             .execute_batch(include_str!(
-                "../../migrations/0005_inventory_replenishments.sql"
+                "../../../migrations/0005_inventory_replenishments.sql"
             ))
             .map_err(storage)?;
         Ok(Self {

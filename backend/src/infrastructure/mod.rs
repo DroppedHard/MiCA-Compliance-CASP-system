@@ -1,24 +1,10 @@
-mod ethereum;
-mod external_deposit_ethereum;
-mod external_deposit_sqlite;
-mod external_withdrawal_sqlite;
-mod fee_sweep_sqlite;
-mod http;
-mod inventory_sqlite;
-mod reconciliation_sqlite;
-mod reporting_sqlite;
-mod retail_sqlite;
+mod blockchain;
+mod issuer;
 mod sqlite;
-mod statement_sqlite;
-pub use ethereum::AlloyWalletGateway;
-pub use external_deposit_ethereum::AlloyExternalDepositGateway;
-pub use external_deposit_sqlite::SqliteExternalDepositStore;
-pub use external_withdrawal_sqlite::SqliteExternalWithdrawalStore;
-pub use fee_sweep_sqlite::SqliteFeeSweepStore;
-pub use http::{HttpBankGateway, HttpIssuerGateway, HttpIssuerPublicGateway};
-pub use inventory_sqlite::SqliteInventoryStore;
-pub use reconciliation_sqlite::SqliteReconciliationStore;
-pub use reporting_sqlite::SqliteReportingStore;
-pub use retail_sqlite::SqliteRetailStore;
-pub use sqlite::SqliteBootstrapStore;
-pub use statement_sqlite::SqliteStatementStore;
+pub use blockchain::{AlloyExternalDepositGateway, AlloyWalletGateway};
+pub use issuer::{HttpBankGateway, HttpIssuerGateway, HttpIssuerPublicGateway};
+pub use sqlite::{
+    SqliteBootstrapStore, SqliteExternalDepositStore, SqliteExternalWithdrawalStore,
+    SqliteFeeSweepStore, SqliteInventoryStore, SqliteReconciliationStore, SqliteReportingStore,
+    SqliteRetailStore, SqliteStatementStore,
+};

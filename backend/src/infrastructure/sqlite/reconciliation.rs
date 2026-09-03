@@ -16,7 +16,7 @@ impl SqliteReconciliationStore {
         let connection = Connection::open(path).map_err(storage)?;
         connection
             .execute_batch(include_str!(
-                "../../migrations/0003_custody_reconciliation.sql"
+                "../../../migrations/0003_custody_reconciliation.sql"
             ))
             .map_err(storage)?;
         if !has_column(

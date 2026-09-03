@@ -3,6 +3,8 @@ import { useState } from "react"
 import { AlertTriangle, Ban, Building2, CheckCircle2, Database, Server, ShieldCheck, Trash2, Users, WalletCards } from "lucide-react"
 import { accountRestrictionApi, api, type RecordItem } from "./api"
 import { rawToRusd } from "./amounts"
+import { isFailedOperation, reconciliationDescription, reconciliationLabel, sevenDayRange } from "./features/admin/model"
+import { adminQueries } from "./application/admin-queries"
 
 const names:Record<string,string>={alice:"Alicja",bob:"Bartosz",carol:"Karolina"}
 
@@ -14,23 +16,19 @@ export function AdminDashboard(){
   const [blockReason,setBlockReason]=useState("Decyzja administratora CASP")
   const [restrictedClient,setRestrictedClient]=useState("alice")
   const [restrictionReason,setRestrictionReason]=useState("Polecenie organu nadzorczego")
-  const reportRange=lastSevenDays()
-  const reconciliation=useQuery({queryKey:["admin","reconciliation"],queryFn:api.reconciliation,refetchInterval:10_000})
-  const wallets=useQuery({queryKey:["admin","wallets"],queryFn:api.wallets,refetchInterval:10_000})
-  const accounts=useQuery({queryKey:["admin","accounts"],queryFn:api.accounts,refetchInterval:10_000})
-  const records=useQuery({queryKey:["admin","records"],queryFn:async()=>{
-    const clients=await api.accounts()
-    const clientRecords=await Promise.all(clients.map(account=>api.records(account.clientId)))
-    return [...new Map(clientRecords.flat().map(record=>[record.recordId,record])).values()].sort((left,right)=>right.createdAtUnixMs-left.createdAtUnixMs)
-  },refetchInterval:10_000})
-  const fees=useQuery({queryKey:["admin","fees"],queryFn:api.fees,refetchInterval:10_000})
+  const reportRange=sevenDayRange(new Date())
+  const reconciliation=useQuery(adminQueries.reconciliation())
+  const wallets=useQuery(adminQueries.wallets())
+  const accounts=useQuery(adminQueries.accounts())
+  const records=useQuery(adminQueries.records())
+  const fees=useQuery(adminQueries.fees())
   const exchangeRate=useQuery({queryKey:["exchange-rate"],queryFn:api.exchangeRate})
-  const blacklist=useQuery({queryKey:["admin","blacklist"],queryFn:api.blacklist})
-  const accountRestrictions=useQuery({queryKey:["admin","account-restrictions"],queryFn:accountRestrictionApi.list})
-  const dailyReport=useQuery({queryKey:["admin","daily-report",reportRange.from,reportRange.to],queryFn:()=>api.dailyReport(reportRange.from,reportRange.to),refetchInterval:10_000})
-  const bootstrap=useQuery({queryKey:["admin","bootstrap"],queryFn:api.bootstrapStatus,refetchInterval:10_000})
-  const replenishments=useQuery({queryKey:["admin","replenishments"],queryFn:api.replenishments,refetchInterval:10_000})
-  const plan=useQuery({queryKey:["admin","rebalancing-plan"],queryFn:api.rebalancingPlan,refetchInterval:10_000})
+  const blacklist=useQuery(adminQueries.blacklist())
+  const accountRestrictions=useQuery(adminQueries.accountRestrictions())
+  const dailyReport=useQuery(adminQueries.dailyReport(reportRange.from,reportRange.to))
+  const bootstrap=useQuery(adminQueries.bootstrap())
+  const replenishments=useQuery(adminQueries.replenishments())
+  const plan=useQuery(adminQueries.rebalancingPlan())
   const replenish=useMutation({mutationFn:()=>api.replenish(crypto.randomUUID(),Math.round(Number(inventoryAmount)*100)),onSuccess:async()=>{await Promise.all([queryClient.invalidateQueries({queryKey:["admin","replenishments"]}),queryClient.invalidateQueries({queryKey:["admin","wallets"]}),queryClient.invalidateQueries({queryKey:["admin","reconciliation"]}),queryClient.invalidateQueries({queryKey:["admin","accounts"]})])}})
   const sweepFees=useMutation({mutationFn:()=>api.sweepFees(crypto.randomUUID()),onSuccess:async()=>{await Promise.all([queryClient.invalidateQueries({queryKey:["admin","fees"]}),queryClient.invalidateQueries({queryKey:["admin","wallets"]}),queryClient.invalidateQueries({queryKey:["admin","reconciliation"]})])}})
   const rebalance=useMutation({mutationFn:api.rebalance,onSuccess:async()=>{await Promise.all([queryClient.invalidateQueries({queryKey:["admin","rebalancing-plan"]}),queryClient.invalidateQueries({queryKey:["admin","wallets"]}),queryClient.invalidateQueries({queryKey:["admin","reconciliation"]})])}})
@@ -41,7 +39,7 @@ export function AdminDashboard(){
   const unblockClient=useMutation({mutationFn:(clientId:string)=>accountRestrictionApi.unblock(clientId),onSuccess:async()=>{await queryClient.invalidateQueries({queryKey:["admin","account-restrictions"]})}})
   const state=reconciliation.data?.status
   const error=reconciliation.error??wallets.error??accounts.error??records.error??fees.error??dailyReport.error??bootstrap.error
-  const failedRecords=records.data?.filter(record=>isFailure(record.status))??[]
+  const failedRecords=records.data?.filter(record=>isFailedOperation(record.status))??[]
 
   return <main className="casp-admin-dashboard">
     <header><div className="brand"><Building2/> CASP rUSD · panel administratora</div><a className="route-link" href="/">Widok klienta</a><span className="badge"><ShieldCheck/> demonstracja bez logowania</span></header>
@@ -49,7 +47,7 @@ export function AdminDashboard(){
     {error&&<section className="error-banner"><AlertTriangle/> {error.message}</section>}
     <div className="admin-workspace">
       <div className="admin-column admin-custody-column">
-        <section className="admin-hero card"><div><p className="eyebrow">UZGODNIENIE SALD</p><h1>{state?statusLabel(state):"Oczekiwanie na dane"}</h1><p className="hint">{state?statusExplanation(state):"System zbiera dane z łańcucha bloków i rejestru CASP."}</p>{state==="mismatch"&&<p className="reconciliation-difference">Wykryta różnica: <strong>{formatSigned(reconciliation.data?.differenceRaw)}</strong></p>}</div><div className={`state-orb ${state??"unavailable"}`}>{state==="balanced"?<CheckCircle2/>:<AlertTriangle/>}</div></section>
+        <section className="admin-hero card"><div><p className="eyebrow">UZGODNIENIE SALD</p><h1>{state?reconciliationLabel(state):"Oczekiwanie na dane"}</h1><p className="hint">{state?reconciliationDescription(state):"System zbiera dane z łańcucha bloków i rejestru CASP."}</p>{state==="mismatch"&&<p className="reconciliation-difference">Wykryta różnica: <strong>{formatSigned(reconciliation.data?.differenceRaw)}</strong></p>}</div><div className={`state-orb ${state??"unavailable"}`}>{state==="balanced"?<CheckCircle2/>:<AlertTriangle/>}</div></section>
         <section className="admin-metrics">
           <AdminMetric icon={WalletCards} label="Portfel gorący" value={formatRaw(wallets.data?.hotRaw)} detail="Cel demo: 20%"/>
           <AdminMetric icon={Database} label="Portfel zimny" value={formatRaw(wallets.data?.coldRaw)} detail="Cel demo: 80%"/>
@@ -77,17 +75,13 @@ export function AdminDashboard(){
 
 function AdminMetric({icon:Icon,label,value,detail}:{icon:typeof ShieldCheck;label:string;value:string;detail:string}){return <article className="card admin-metric"><Icon/><span>{label}</span><strong>{value}</strong><small>{detail}</small></article>}
 function Row({label,value,strong=false}:{label:string;value:string;strong?:boolean}){return <div className={strong?"summary-row strong":"summary-row"}><span>{label}</span><b>{value}</b></div>}
-function Operation({record}:{record:RecordItem}){return <article className={`operation ${isFailure(record.status)?"failed":""}`}><div className="operation-route"><span>{names[record.sourceAccount??""]??record.sourceAccount??"CASP"}</span><i>→</i><span>{names[record.destinationAccount??""]??record.destinationAccount??"CASP"}</span></div><strong>{rawToRusd(record.netQuantityRaw)} rUSD</strong><small>{operationLabel(record.orderType)} · {new Date(record.receivedAtUnixMs).toLocaleString("pl-PL")}</small><small>{priceMethodLabel(record.priceMethod)} · kanał: panel demonstracyjny</small><span className="operation-status">{operationStatusLabel(record.status)}</span></article>}
+function Operation({record}:{record:RecordItem}){return <article className={`operation ${isFailedOperation(record.status)?"failed":""}`}><div className="operation-route"><span>{names[record.sourceAccount??""]??record.sourceAccount??"CASP"}</span><i>→</i><span>{names[record.destinationAccount??""]??record.destinationAccount??"CASP"}</span></div><strong>{rawToRusd(record.netQuantityRaw)} rUSD</strong><small>{operationLabel(record.orderType)} · {new Date(record.receivedAtUnixMs).toLocaleString("pl-PL")}</small><small>{priceMethodLabel(record.priceMethod)} · kanał: panel demonstracyjny</small><span className="operation-status">{operationStatusLabel(record.status)}</span></article>}
 function formatRaw(value:string|undefined|null){return value===undefined||value===null?"—":`${rawToRusd(value)} rUSD`}
 function formatSigned(value:string|undefined|null){if(value===undefined||value===null)return "—";const number=Number(value)/1_000_000;return `${number>0?"+":""}${number.toLocaleString("pl-PL",{maximumFractionDigits:6})} rUSD`}
 function shortHash(value:string|undefined|null){return value?`${value.slice(0,10)}…${value.slice(-6)}`:"—"}
-function statusLabel(value:"balanced"|"warning"|"mismatch"|"unavailable"){return {balanced:"Salda uzgodnione",warning:"Odchylenie podziału 20/80",mismatch:"Niezgodność sald",unavailable:"Brak danych do uzgodnienia"}[value]}
-function statusExplanation(value:"balanced"|"warning"|"mismatch"|"unavailable"){return {balanced:"Portfele odpowiadają zapisom rejestru i docelowemu podziałowi.",warning:"Łączna ilość tokenów jest uzgodniona, ale proporcja portfela gorącego i zimnego odbiega od polityki demonstracyjnej. Operacje nie są blokowane.",mismatch:"Portfele nie odpowiadają rejestrowi. To alarm diagnostyczny, a nie automatyczna blokada operacji.",unavailable:"Nie udało się pobrać danych kontrolnych. Operacje nie są z tego powodu automatycznie blokowane."}[value]}
 function priceMethodLabel(value:string){return value==="not_applicable"?"kurs nie dotyczy":value==="casp_admin_configured_rate"?"kurs ustalony przez CASP":"metoda historyczna"}
 function formatRate(value:number|undefined){return ((value??100)/100).toLocaleString("pl-PL",{minimumFractionDigits:2,maximumFractionDigits:2})}
 function operationLabel(value:string){return {purchase:"zakup",sale:"sprzedaż",internal_transfer:"przelew wewnętrzny",external_deposit:"wpłata zewnętrzna",external_withdrawal:"wypłata na portfel",redemption:"wykup u emitenta"}[value]??value}
 function operationStatusLabel(value:string){return {created:"utworzona",issuer_order_created:"zlecenie utworzone u emitenta",fiat_sent:"wpłata USD przekazana",tokens_issued:"tokeny wyemitowane",targets_recorded:"zapisano docelowy podział",cold_distributed:"przeniesiono część do portfela zimnego",distributed:"tokeny rozdzielone",completed:"zakończona",pending:"oczekująca",processing:"przetwarzana",failed:"nieudana",rejected:"odrzucona",cancelled:"anulowana"}[value.toLowerCase()]??value}
-function isFailure(value:string){return ["failed","rejected","cancelled"].includes(value.toLowerCase())}
 function formatMinor(value:string){return (Number(value)/100).toLocaleString("pl-PL",{minimumFractionDigits:2,maximumFractionDigits:2})}
 function formatDelta(value:number|undefined){if(value===undefined)return "—";return `${value>0?"+":""}${rawToRusd(String(value))} rUSD`}
-function lastSevenDays(){const to=new Date();const from=new Date(to);from.setUTCDate(from.getUTCDate()-6);return {from:from.toISOString().slice(0,10),to:to.toISOString().slice(0,10)}}

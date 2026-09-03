@@ -18,12 +18,12 @@ impl SqliteExternalDepositStore {
         }
         let connection = Connection::open(path).map_err(storage)?;
         for migration in [
-            include_str!("../../migrations/0002_retail.sql"),
-            include_str!("../../migrations/0006_extended_service_records.sql"),
-            include_str!("../../migrations/0010_client_wallets.sql"),
-            include_str!("../../migrations/0011_external_deposits.sql"),
-            include_str!("../../migrations/0012_address_blacklist.sql"),
-            include_str!("../../migrations/0016_client_account_restrictions.sql"),
+            include_str!("../../../migrations/0002_retail.sql"),
+            include_str!("../../../migrations/0006_extended_service_records.sql"),
+            include_str!("../../../migrations/0010_client_wallets.sql"),
+            include_str!("../../../migrations/0011_external_deposits.sql"),
+            include_str!("../../../migrations/0012_address_blacklist.sql"),
+            include_str!("../../../migrations/0016_client_account_restrictions.sql"),
         ] {
             connection.execute_batch(migration).map_err(storage)?;
         }

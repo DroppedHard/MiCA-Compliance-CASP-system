@@ -21,12 +21,12 @@ impl SqliteExternalWithdrawalStore {
         }
         let connection = Connection::open(path).map_err(storage)?;
         for migration in [
-            include_str!("../../migrations/0002_retail.sql"),
-            include_str!("../../migrations/0004_internal_transfers.sql"),
-            include_str!("../../migrations/0006_extended_service_records.sql"),
-            include_str!("../../migrations/0010_client_wallets.sql"),
-            include_str!("../../migrations/0013_external_withdrawals.sql"),
-            include_str!("../../migrations/0016_client_account_restrictions.sql"),
+            include_str!("../../../migrations/0002_retail.sql"),
+            include_str!("../../../migrations/0004_internal_transfers.sql"),
+            include_str!("../../../migrations/0006_extended_service_records.sql"),
+            include_str!("../../../migrations/0010_client_wallets.sql"),
+            include_str!("../../../migrations/0013_external_withdrawals.sql"),
+            include_str!("../../../migrations/0016_client_account_restrictions.sql"),
         ] {
             connection.execute_batch(migration).map_err(storage)?;
         }

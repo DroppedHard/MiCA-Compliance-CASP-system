@@ -2,6 +2,12 @@
 
 Serwis Rust prowadzi niezależny rejestr praw klientów i komunikuje się z emitentem przez HTTP. SQLite przechowuje pozycje klientów, zapas, prowizje i historię operacji; blockchain dostarcza salda portfeli custody.
 
+## Struktura kodu
+
+Warstwa `src/api` jest celowo cienka: `router` scala trasy, `routes` deklaruje adresy HTTP, `requests` i `validators` opisują oraz sprawdzają dane wejściowe, a `responses` mapuje błędy domenowe na stabilne odpowiedzi HTTP. Handlery są rozdzielone na `public`, `administration` i `customer`; wywołują wyłącznie usługi przez `AppState`.
+
+Przypadki użycia są w `src/services`, modele i reguły biznesowe w `src/domain`, a implementacje portów w `src/infrastructure/sqlite`, `src/infrastructure/blockchain` i `src/infrastructure/issuer`. Dzięki temu endpoint nie zawiera SQL ani szczegółów komunikacji z blockchainem albo emitentem.
+
 ## Portfele
 
 - gorący — realizuje operacje zewnętrzne;
@@ -21,4 +27,6 @@ cargo fmt --all --check
 cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+# Planowane OpenAPI
 
+Kontrakty HTTP są obecnie utrzymywane ręcznie. Planowanym rozszerzeniem jest generowanie specyfikacji OpenAPI bezpośrednio z tras, modeli żądań i odpowiedzi oraz typów błędów. Ma to ułatwić integrację frontendu CASP i komunikację CASP–emitent, ale nie jest częścią bieżącego refaktoru struktury kodu.

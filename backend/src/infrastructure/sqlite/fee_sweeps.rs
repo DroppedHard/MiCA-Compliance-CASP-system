@@ -18,13 +18,15 @@ impl SqliteFeeSweepStore {
         }
         let connection = Connection::open(path).map_err(storage)?;
         connection
-            .execute_batch(include_str!("../../migrations/0002_retail.sql"))
+            .execute_batch(include_str!("../../../migrations/0002_retail.sql"))
             .map_err(storage)?;
         connection
-            .execute_batch(include_str!("../../migrations/0004_internal_transfers.sql"))
+            .execute_batch(include_str!(
+                "../../../migrations/0004_internal_transfers.sql"
+            ))
             .map_err(storage)?;
         connection
-            .execute_batch(include_str!("../../migrations/0009_fee_sweeps.sql"))
+            .execute_batch(include_str!("../../../migrations/0009_fee_sweeps.sql"))
             .map_err(storage)?;
         Ok(Self {
             connection: Mutex::new(connection),

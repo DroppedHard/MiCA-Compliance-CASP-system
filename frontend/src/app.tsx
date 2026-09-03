@@ -4,6 +4,8 @@ import { FormEvent, useEffect, useState } from "react"
 import { api } from "./api"
 import { rawToRusd, usdToMinor, usdToRaw } from "./amounts"
 import { AdminDashboard } from "./admin-dashboard"
+import { assetStateDescription, assetStateLabel, customerRecordPresentation, isPurchaseBlocked, recipientWallet as resolveRecipientWallet } from "./features/customer/model"
+import { customerQueries } from "./application/customer-queries"
 import { StatementPage } from "./statement"
 import "./token-info.css"
 
@@ -21,13 +23,13 @@ function CustomerApp(){
   const [recipientId,setRecipientId]=useState("bob")
   const [purpose,setPurpose]=useState("private_transfer")
   const [destinationAddress,setDestinationAddress]=useState("0x90F79bf6EB2c4f870365E785982E1f101E93b906")
-  const account=useQuery({queryKey:["account",clientId],queryFn:()=>api.account(clientId),refetchInterval:3000})
-  const accounts=useQuery({queryKey:["accounts"],queryFn:api.accounts,refetchInterval:3000})
-  const records=useQuery({queryKey:["records",clientId],queryFn:()=>api.records(clientId),refetchInterval:3000})
-  const tokenInfo=useQuery({queryKey:["token-information"],queryFn:api.tokenInformation,refetchInterval:10_000})
-  const exchangeRate=useQuery({queryKey:["exchange-rate"],queryFn:api.exchangeRate,refetchInterval:10_000})
-  const recipientWallet=accounts.data?.find(item=>item.clientId===recipientId)?.walletAddress??recipientId
-  const purchaseBlocked=mode==="purchase"&&tokenInfo.data?.assetState==="wind_down"
+  const account=useQuery(customerQueries.account(clientId))
+  const accounts=useQuery(customerQueries.accounts())
+  const records=useQuery(customerQueries.records(clientId))
+  const tokenInfo=useQuery(customerQueries.tokenInformation())
+  const exchangeRate=useQuery(customerQueries.exchangeRate())
+  const recipientWallet=resolveRecipientWallet(accounts.data,recipientId)
+  const purchaseBlocked=isPurchaseBlocked(mode,tokenInfo.data?.assetState)
   useEffect(()=>{if(purchaseBlocked)setMode("sale")},[purchaseBlocked])
   const mutation=useMutation<unknown,Error>({mutationFn:()=>mode==="purchase"?api.purchase(clientId,crypto.randomUUID(),usdToMinor(amount)):mode==="sale"?api.sale(clientId,crypto.randomUUID(),usdToRaw(amount)):mode==="transfer"?api.transfer(clientId,crypto.randomUUID(),recipientWallet,usdToRaw(amount),purpose):api.externalWithdrawal(clientId,crypto.randomUUID(),destinationAddress,usdToRaw(amount)),onSuccess:()=>queryClient.invalidateQueries()})
   const submit=(event:FormEvent)=>{event.preventDefault();if(!purchaseBlocked)mutation.mutate()}
@@ -46,6 +48,4 @@ function CustomerApp(){
 }
 function formatRate(value:number|undefined){return ((value??100)/100).toLocaleString("pl-PL",{minimumFractionDigits:2,maximumFractionDigits:2})}
 function formatEnergy(value:number){return `${value.toLocaleString("pl-PL",{maximumFractionDigits:2})} Wh`}
-function assetStateLabel(value:string){return {active:"Aktywny",warning:"Ostrzeżenie",mint_blocked:"Emisja zablokowana",data_unavailable:"Brak danych",wind_down:"Wygaszanie"}[value]??value}
-function assetStateDescription(value:string){return value==="wind_down"?"Nie można kupować nowych rUSD. Sprzedaż i wyjście klienta pozostają dostępne.":value==="mint_blocked"?"Emitent nie może tworzyć nowych tokenów; obrót istniejącą pulą CASP pozostaje dostępny.":value==="warning"?"Token działa, ale emitent wskazuje podwyższone ryzyko.":value==="active"?"Token działa bez aktywnej blokady cyklu życia.":"Nie udało się potwierdzić bieżącego stanu tokenu."}
-function CustomerRecord({record,clientId}:{record:import("./api").RecordItem;clientId:string}){const transfer=record.orderType==="internal_transfer";const sent=transfer&&record.sourceAccount===clientId;const received=transfer&&record.destinationAccount===clientId;const deposit=record.orderType==="external_deposit";const withdrawal=record.orderType==="external_withdrawal";const amount=(received||withdrawal)?record.netQuantityRaw:record.grossQuantityRaw;const title=sent?"Wysłano przelew":received?"Otrzymano przelew":deposit?"Wpłata zewnętrzna":withdrawal?"Wypłata na portfel":record.orderType==="purchase"?"Zakup":record.orderType==="sale"?"Sprzedaż":"Wykup";return <article><div><strong>{title} · {rawToRusd(amount)} rUSD</strong>{(sent||withdrawal)&&Number(record.feeQuantityRaw)>0&&<small>Prowizja CASP: {rawToRusd(record.feeQuantityRaw)} rUSD{sent&&` · odbiorca otrzymał ${rawToRusd(record.netQuantityRaw)} rUSD`}</small>}{deposit&&<small>Nadawca w łańcuchu bloków: {record.sourceAccount??"—"}</small>}{withdrawal&&<small>Adres docelowy: {record.destinationAccount} · {record.blockchainTransactionHash}</small>}<small>{new Date(record.createdAtUnixMs).toLocaleString("pl-PL")} · {record.operationId}</small></div><span className={`status ${record.status}`}>{record.status==="completed"?"zakończona":record.status}</span></article>}
+function CustomerRecord({record,clientId}:{record:import("./api").RecordItem;clientId:string}){const view=customerRecordPresentation(record,clientId);const sent=record.orderType==="internal_transfer"&&record.sourceAccount===clientId;const deposit=record.orderType==="external_deposit";const withdrawal=record.orderType==="external_withdrawal";return <article><div><strong>{view.title} · {rawToRusd(view.amountRaw)} rUSD</strong>{view.showFee&&<small>Prowizja CASP: {rawToRusd(record.feeQuantityRaw)} rUSD{sent&&` · odbiorca otrzymał ${rawToRusd(record.netQuantityRaw)} rUSD`}</small>}{deposit&&<small>Nadawca w łańcuchu bloków: {record.sourceAccount??"—"}</small>}{withdrawal&&<small>Adres docelowy: {record.destinationAccount} · {record.blockchainTransactionHash}</small>}<small>{new Date(record.createdAtUnixMs).toLocaleString("pl-PL")} · {record.operationId}</small></div><span className={`status ${record.status}`}>{record.status==="completed"?"zakończona":record.status}</span></article>}

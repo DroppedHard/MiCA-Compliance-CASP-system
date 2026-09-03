@@ -1,6 +1,6 @@
 use crate::{
     retail::{
-        ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord,
+        ClientAccount, ExchangeRate, FeePosition, InternalTransfer, RetailOrder, ServiceRecord,
         ServiceRecordAmendment,
     },
     retail_application::{RetailError, RetailStore, TransferPosting},
@@ -39,6 +39,9 @@ impl SqliteRetailStore {
             .map_err(storage)?;
         connection
             .execute_batch(include_str!("../../migrations/0010_client_wallets.sql"))
+            .map_err(storage)?;
+        connection
+            .execute_batch(include_str!("../../migrations/0015_exchange_rate.sql"))
             .map_err(storage)?;
         migrate_sale_order_type(&mut connection)?;
         Ok(Self {
@@ -158,11 +161,18 @@ impl RetailStore for SqliteRetailStore {
         contract: &str,
         chain: u64,
     ) -> Result<RetailOrder, RetailError> {
-        let raw = cents
-            .checked_mul(UNITS_PER_CENT)
-            .ok_or_else(|| RetailError::Invalid("amount is too large".into()))?;
         let mut connection = self.connection.lock().map_err(storage)?;
         let tx = connection.transaction().map_err(storage)?;
+        let rate = exchange_rate_minor(&tx)?;
+        let raw = cents
+            .checked_mul(1_000_000)
+            .ok_or_else(|| RetailError::Invalid("amount is too large".into()))?
+            / rate;
+        if raw == 0 {
+            return Err(RetailError::Invalid(
+                "amount is below the configured exchange-rate precision".into(),
+            ));
+        }
         if let Some(existing) = order(&tx, id)? {
             verify_same(&existing, "purchase", client, raw, cents)?;
             return Ok(existing);
@@ -203,9 +213,13 @@ impl RetailStore for SqliteRetailStore {
         contract: &str,
         chain: u64,
     ) -> Result<RetailOrder, RetailError> {
-        let cents = raw / UNITS_PER_CENT;
         let mut connection = self.connection.lock().map_err(storage)?;
         let tx = connection.transaction().map_err(storage)?;
+        let rate = exchange_rate_minor(&tx)?;
+        let cents = raw
+            .checked_mul(rate)
+            .ok_or_else(|| RetailError::Invalid("amount is too large".into()))?
+            / 1_000_000;
         if let Some(existing) = order(&tx, id)? {
             verify_same(&existing, "sale", client, raw, cents)?;
             return Ok(existing);
@@ -529,6 +543,22 @@ impl RetailStore for SqliteRetailStore {
             pending_raw: pending.to_string(),
         })
     }
+
+    fn exchange_rate(&self) -> Result<ExchangeRate, RetailError> {
+        let connection = self.connection.lock().map_err(storage)?;
+        read_exchange_rate(&connection)
+    }
+
+    fn set_exchange_rate(&self, usd_minor_per_rusd: u64) -> Result<ExchangeRate, RetailError> {
+        let connection = self.connection.lock().map_err(storage)?;
+        connection
+            .execute(
+                "UPDATE casp_exchange_rate SET usd_minor_per_rusd=?1,updated_at_unix_ms=?2 WHERE singleton=1",
+                params![as_i64(usd_minor_per_rusd)?, now() as i64],
+            )
+            .map_err(storage)?;
+        read_exchange_rate(&connection)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -615,11 +645,38 @@ fn record(
     let unit_price = if kind == "internal_transfer" {
         None
     } else {
-        Some(100_i64)
+        Some(as_i64(exchange_rate_minor(tx)?)?)
     };
     let retention = timestamp.saturating_add(5 * 365 * 24 * 60 * 60 * 1_000);
-    tx.execute("INSERT INTO service_record_details(record_id,record_status,received_at_unix_ms,accepted_at_unix_ms,executed_at_unix_ms,settled_at_unix_ms,failed_at_unix_ms,price_method,unit_price_minor,gross_quantity_raw,net_quantity_raw,fee_quantity_raw,instruction_channel,execution_actor,policy_version,rejection_reason,retention_until_unix_ms) VALUES(?1,'new',?2,?2,?3,?3,NULL,?4,?5,?6,?7,?8,'demo_web','casp-retail-engine','casp-service-record-v2',NULL,?9)",params![record_id,timestamp as i64,completed.then_some(timestamp as i64),if kind=="internal_transfer"{"not_applicable"}else{"fixed_parity_1_rusd_1_usd"},unit_price,as_i64(raw)?,as_i64(net_raw)?,as_i64(fee_raw)?,retention as i64]).map_err(storage)?;
+    tx.execute("INSERT INTO service_record_details(record_id,record_status,received_at_unix_ms,accepted_at_unix_ms,executed_at_unix_ms,settled_at_unix_ms,failed_at_unix_ms,price_method,unit_price_minor,gross_quantity_raw,net_quantity_raw,fee_quantity_raw,instruction_channel,execution_actor,policy_version,rejection_reason,retention_until_unix_ms) VALUES(?1,'new',?2,?2,?3,?3,NULL,?4,?5,?6,?7,?8,'demo_web','casp-retail-engine','casp-service-record-v2',NULL,?9)",params![record_id,timestamp as i64,completed.then_some(timestamp as i64),if kind=="internal_transfer"{"not_applicable"}else{"casp_admin_configured_rate"},unit_price,as_i64(raw)?,as_i64(net_raw)?,as_i64(fee_raw)?,retention as i64]).map_err(storage)?;
     Ok(())
+}
+
+fn exchange_rate_minor(connection: &Connection) -> Result<u64, RetailError> {
+    let value: i64 = connection
+        .query_row(
+            "SELECT usd_minor_per_rusd FROM casp_exchange_rate WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    u64::try_from(value).map_err(storage)
+}
+
+fn read_exchange_rate(connection: &Connection) -> Result<ExchangeRate, RetailError> {
+    connection
+        .query_row(
+            "SELECT usd_minor_per_rusd,updated_at_unix_ms FROM casp_exchange_rate WHERE singleton=1",
+            [],
+            |row| {
+                Ok(ExchangeRate {
+                    usd_minor_per_rusd: row.get::<_, i64>(0)? as u64,
+                    updated_at_unix_ms: row.get::<_, i64>(1)? as u64,
+                    methodology: "casp-admin-configured-rate-v1".into(),
+                })
+            },
+        )
+        .map_err(storage)
 }
 
 const RECORD_SELECT: &str = "SELECT s.record_id,s.operation_id,s.client_id,s.service_type,s.order_type,s.asset_symbol,s.contract_address,s.chain_id,s.quantity_raw,s.fiat_currency,s.gross_fiat_minor,s.fee_minor,s.status,s.source_account,s.destination_account,s.blockchain_transaction_hash,s.decision_actor,s.created_at_unix_ms,COALESCE(d.record_status,'new'),COALESCE(d.received_at_unix_ms,s.created_at_unix_ms),d.accepted_at_unix_ms,d.executed_at_unix_ms,d.settled_at_unix_ms,d.failed_at_unix_ms,COALESCE(d.price_method,'legacy_unspecified'),d.unit_price_minor,COALESCE(d.gross_quantity_raw,s.quantity_raw),COALESCE(d.net_quantity_raw,s.quantity_raw),COALESCE(d.fee_quantity_raw,0),COALESCE(d.instruction_channel,'legacy_unspecified'),COALESCE(d.execution_actor,s.decision_actor),COALESCE(d.policy_version,'casp-service-record-v1'),d.rejection_reason,COALESCE(d.retention_until_unix_ms,s.created_at_unix_ms) FROM service_records s LEFT JOIN service_record_details d ON d.record_id=s.record_id";
@@ -769,6 +826,24 @@ mod tests {
         assert_eq!(s.records(CLIENT).unwrap().len(), 1)
     }
     #[test]
+    fn configured_exchange_rate_is_used_by_purchase_sale_and_record() {
+        let s = SqliteRetailStore::open(":memory:").unwrap();
+        s.activate_inventory(10_000_000).unwrap();
+        let rate = s.set_exchange_rate(125).unwrap();
+        assert_eq!(rate.usd_minor_per_rusd, 125);
+
+        let purchase = s.purchase("rate-p", CLIENT, 250, "0x1", 31337).unwrap();
+        assert_eq!(purchase.quantity_raw, "2000000");
+        let sale = s.sale("rate-s", CLIENT, 1_000_000, "0x1", 31337).unwrap();
+        assert_eq!(sale.fiat_amount_minor, "125");
+
+        let records = s.records(CLIENT).unwrap();
+        assert!(records.iter().all(|record| {
+            record.price_method == "casp_admin_configured_rate"
+                && record.unit_price_minor.as_deref() == Some("125")
+        }));
+    }
+    #[test]
     fn redemption_locks_then_removes_position() {
         let s = SqliteRetailStore::open(":memory:").unwrap();
         s.activate_inventory(10_000_000).unwrap();
@@ -836,7 +911,7 @@ mod tests {
             .purchase("purchase-record", CLIENT, 100, "0xasset", 31337)
             .unwrap();
         let record = store.records(CLIENT).unwrap().remove(0);
-        assert_eq!(record.price_method, "fixed_parity_1_rusd_1_usd");
+        assert_eq!(record.price_method, "casp_admin_configured_rate");
         assert_eq!(record.unit_price_minor.as_deref(), Some("100"));
         assert_eq!(record.gross_quantity_raw, "1000000");
         assert_eq!(record.net_quantity_raw, "1000000");

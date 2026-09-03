@@ -1,6 +1,8 @@
+use crate::account_restrictions::AccountRestrictionReader;
+use crate::blacklist::AddressBlacklist;
 use crate::reconciliation::ReconciliationService;
 use crate::retail::{
-    ClientAccount, FeePosition, InternalTransfer, RetailOrder, ServiceRecord,
+    ClientAccount, ExchangeRate, FeePosition, InternalTransfer, RetailOrder, ServiceRecord,
     ServiceRecordAmendment,
 };
 use alloy::primitives::Address;
@@ -57,6 +59,8 @@ pub trait RetailStore: Send + Sync {
     fn amendments(&self) -> Result<Vec<ServiceRecordAmendment>, RetailError>;
     fn transfer(&self, command: TransferPosting<'_>) -> Result<InternalTransfer, RetailError>;
     fn fee_position(&self) -> Result<FeePosition, RetailError>;
+    fn exchange_rate(&self) -> Result<ExchangeRate, RetailError>;
+    fn set_exchange_rate(&self, usd_minor_per_rusd: u64) -> Result<ExchangeRate, RetailError>;
 }
 pub struct TransferPosting<'a> {
     pub id: &'a str,
@@ -81,6 +85,10 @@ pub trait RetailIssuerGateway: Send + Sync {
     ) -> Result<(), RetailError>;
     async fn settle_redemption(&self, id: &str) -> Result<IssuerRedemption, RetailError>;
 }
+#[async_trait]
+pub trait RetailTokenState: Send + Sync {
+    async fn current_state(&self) -> Result<String, RetailError>;
+}
 #[derive(Clone)]
 pub struct RetailService {
     store: Arc<dyn RetailStore>,
@@ -90,6 +98,9 @@ pub struct RetailService {
     chain: u64,
     reconciliation: Arc<ReconciliationService>,
     lock: Arc<tokio::sync::Mutex<()>>,
+    blacklist: Option<Arc<dyn AddressBlacklist>>,
+    account_restrictions: Option<Arc<dyn AccountRestrictionReader>>,
+    token_state: Option<Arc<dyn RetailTokenState>>,
 }
 impl RetailService {
     pub fn new(
@@ -108,7 +119,41 @@ impl RetailService {
             chain,
             reconciliation,
             lock: Arc::new(tokio::sync::Mutex::new(())),
+            blacklist: None,
+            account_restrictions: None,
+            token_state: None,
         }
+    }
+    pub fn with_token_state(mut self, token_state: Arc<dyn RetailTokenState>) -> Self {
+        self.token_state = Some(token_state);
+        self
+    }
+    pub fn with_account_restrictions(
+        mut self,
+        restrictions: Arc<dyn AccountRestrictionReader>,
+    ) -> Self {
+        self.account_restrictions = Some(restrictions);
+        self
+    }
+    fn ensure_account_active(&self, client: &str) -> Result<(), RetailError> {
+        if self
+            .account_restrictions
+            .as_ref()
+            .map(|store| store.is_restricted(client))
+            .transpose()
+            .map_err(|error| RetailError::Storage(error.to_string()))?
+            .unwrap_or(false)
+        {
+            Err(RetailError::AccountRestricted(
+                client_display_name(client).to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    pub fn with_blacklist(mut self, blacklist: Arc<dyn AddressBlacklist>) -> Self {
+        self.blacklist = Some(blacklist);
+        self
     }
     pub fn activate_bootstrap_inventory(&self, amount: u64) -> Result<(), RetailError> {
         self.store.activate_inventory(amount)
@@ -147,6 +192,17 @@ impl RetailService {
     pub fn fee_position(&self) -> Result<FeePosition, RetailError> {
         self.store.fee_position()
     }
+    pub fn exchange_rate(&self) -> Result<ExchangeRate, RetailError> {
+        self.store.exchange_rate()
+    }
+    pub fn set_exchange_rate(&self, value: u64) -> Result<ExchangeRate, RetailError> {
+        if !(1..=10_000).contains(&value) {
+            return Err(RetailError::Invalid(
+                "usdMinorPerRusd must be between 1 and 10000".into(),
+            ));
+        }
+        self.store.set_exchange_rate(value)
+    }
     pub async fn transfer(
         &self,
         sender: &str,
@@ -163,6 +219,23 @@ impl RetailService {
                 recipient.to_owned()
             }
         };
+        self.ensure_account_active(sender)?;
+        self.ensure_account_active(&recipient_id)?;
+        let sender_account = self.store.account(sender)?;
+        let recipient_account = self.store.account(&recipient_id)?;
+        if let Some(blacklist) = &self.blacklist {
+            for address in [
+                &sender_account.wallet_address,
+                &recipient_account.wallet_address,
+            ] {
+                if blacklist
+                    .is_blocked(address)
+                    .map_err(|error| RetailError::Storage(error.to_string()))?
+                {
+                    return Err(RetailError::BlacklistedAddress(address.clone()));
+                }
+            }
+        }
         validate_id(id)?;
         if sender == recipient_id {
             return Err(RetailError::Invalid(
@@ -206,6 +279,12 @@ impl RetailService {
         amount_minor: u64,
     ) -> Result<RetailOrder, RetailError> {
         validate_client(client)?;
+        self.ensure_account_active(client)?;
+        if let Some(token_state) = &self.token_state
+            && token_state.current_state().await? == "wind_down"
+        {
+            return Err(RetailError::TokenWindDown);
+        }
         validate_id(id)?;
         if amount_minor == 0 {
             return Err(RetailError::Invalid(
@@ -213,8 +292,10 @@ impl RetailService {
             ));
         }
         let _guard = self.lock.lock().await;
+        // Reconciliation is diagnostic in the demo. Availability is governed by
+        // the CASP inventory ledger; custody drift is shown to the administrator.
         self.reconciliation
-            .require_customer_purchase()
+            .check()
             .await
             .map_err(|error| RetailError::Reconciliation(error.to_string()))?;
         let order = self
@@ -233,6 +314,7 @@ impl RetailService {
         amount_raw: u64,
     ) -> Result<RetailOrder, RetailError> {
         validate_client(client)?;
+        self.ensure_account_active(client)?;
         validate_id(id)?;
         if amount_raw == 0 || !amount_raw.is_multiple_of(TOKEN_UNITS_PER_CENT) {
             return Err(RetailError::Invalid(
@@ -263,6 +345,7 @@ impl RetailService {
         amount_raw: u64,
     ) -> Result<RetailOrder, RetailError> {
         validate_client(client)?;
+        self.ensure_account_active(client)?;
         validate_id(id)?;
         if amount_raw == 0 || !amount_raw.is_multiple_of(TOKEN_UNITS_PER_CENT) {
             return Err(RetailError::Invalid(
@@ -328,6 +411,12 @@ pub enum RetailError {
     InsufficientInventory,
     #[error("insufficient client balance")]
     InsufficientBalance,
+    #[error("transfer rejected because address is blacklisted: {0}")]
+    BlacklistedAddress(String),
+    #[error("konto klienta jest zablokowane: {0}")]
+    AccountRestricted(String),
+    #[error("Zakup rUSD jest niedostępny, ponieważ token jest wygaszany.")]
+    TokenWindDown,
     #[error("retail persistence failed: {0}")]
     Storage(String),
     #[error("issuer redemption failed: {0}")]
@@ -352,11 +441,22 @@ fn validate_client(client: &str) -> Result<(), RetailError> {
     }
 }
 
+fn client_display_name(client: &str) -> &str {
+    match client {
+        "alice" => "Alicja",
+        "bob" => "Bartosz",
+        "carol" => "Karolina",
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
+        account_restrictions::SqliteAccountRestrictions,
         application::{BootstrapError, WalletGateway},
+        blacklist::SqliteAddressBlacklist,
         domain::WalletBalances,
         infrastructure::{SqliteReconciliationStore, SqliteRetailStore},
         reconciliation::ReconciliationService,
@@ -380,6 +480,13 @@ mod tests {
     struct Wallet {
         hot: u64,
         cold: u64,
+    }
+    struct TokenState(&'static str);
+    #[async_trait]
+    impl RetailTokenState for TokenState {
+        async fn current_state(&self) -> Result<String, RetailError> {
+            Ok(self.0.into())
+        }
     }
     #[async_trait]
     impl WalletGateway for Wallet {
@@ -443,7 +550,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn purchase_is_rejected_before_ledger_change_when_custody_is_short() {
+    async fn custody_mismatch_is_reported_but_does_not_block_an_inventory_purchase() {
         let store = Arc::new(SqliteRetailStore::open(":memory:").unwrap());
         store.activate_inventory(10_000_000).unwrap();
         let service = RetailService::new(
@@ -465,11 +572,8 @@ mod tests {
             )),
         );
 
-        assert!(matches!(
-            service.purchase("alice", "purchase", 100).await,
-            Err(RetailError::Reconciliation(_))
-        ));
-        assert_eq!(store.account("alice").unwrap().available_raw, "0");
+        service.purchase("alice", "purchase", 100).await.unwrap();
+        assert_eq!(store.account("alice").unwrap().available_raw, "1000000");
     }
 
     #[tokio::test]
@@ -585,5 +689,122 @@ mod tests {
         assert_eq!(usize::from(bob.is_ok()) + usize::from(carol.is_ok()), 1);
         assert_eq!(store.account("alice").unwrap().available_raw, "500000");
         assert_eq!(store.fee_position().unwrap().pending_raw, "1000");
+    }
+
+    #[tokio::test]
+    async fn blacklisted_sender_or_recipient_is_rejected_without_balance_or_fee_change() {
+        let store = Arc::new(SqliteRetailStore::open(":memory:").unwrap());
+        store.activate_inventory(10_000_000).unwrap();
+        store
+            .purchase("purchase", "alice", 100, "0x1", 31337)
+            .unwrap();
+        let blacklist = Arc::new(SqliteAddressBlacklist::open(":memory:").unwrap());
+        let service = RetailService::new(
+            store.clone(),
+            Arc::new(Issuer(AtomicUsize::new(0))),
+            Address::with_last_byte(2),
+            "0x1".into(),
+            31337,
+            Arc::new(ReconciliationService::new(
+                Arc::new(SqliteReconciliationStore::open(":memory:").unwrap()),
+                store.clone(),
+                Arc::new(Wallet {
+                    hot: 2_000_000,
+                    cold: 8_000_000,
+                }),
+                Address::with_last_byte(1),
+                Address::with_last_byte(2),
+                Address::with_last_byte(3),
+            )),
+        )
+        .with_blacklist(blacklist.clone());
+
+        blacklist
+            .add("rusd:casp:bob", "test recipient block")
+            .unwrap();
+        assert!(matches!(
+            service.transfer("alice", "bob", "blocked-recipient", 100_000, "private_transfer").await,
+            Err(RetailError::BlacklistedAddress(address)) if address == "rusd:casp:bob"
+        ));
+        blacklist.remove("rusd:casp:bob").unwrap();
+        blacklist
+            .add("rusd:casp:alice", "test sender block")
+            .unwrap();
+        assert!(matches!(
+            service.transfer("alice", "bob", "blocked-sender", 100_000, "private_transfer").await,
+            Err(RetailError::BlacklistedAddress(address)) if address == "rusd:casp:alice"
+        ));
+        assert_eq!(store.account("alice").unwrap().available_raw, "1000000");
+        assert_eq!(store.account("bob").unwrap().available_raw, "0");
+        assert_eq!(store.fee_position().unwrap().pending_raw, "0");
+    }
+
+    #[tokio::test]
+    async fn restricted_account_cannot_trade_or_participate_in_internal_transfers() {
+        let store = Arc::new(SqliteRetailStore::open(":memory:").unwrap());
+        store.activate_inventory(10_000_000).unwrap();
+        let restrictions = Arc::new(SqliteAccountRestrictions::open(":memory:").unwrap());
+        restrictions.block("alice", "polecenie organu").unwrap();
+        let service = RetailService::new(
+            store.clone(),
+            Arc::new(Issuer(AtomicUsize::new(0))),
+            Address::with_last_byte(2),
+            "0x1".into(),
+            31337,
+            Arc::new(ReconciliationService::new(
+                Arc::new(SqliteReconciliationStore::open(":memory:").unwrap()),
+                store.clone(),
+                Arc::new(Wallet {
+                    hot: 2_000_000,
+                    cold: 8_000_000,
+                }),
+                Address::with_last_byte(1),
+                Address::with_last_byte(2),
+                Address::with_last_byte(3),
+            )),
+        )
+        .with_account_restrictions(restrictions);
+
+        assert!(
+            matches!(service.purchase("alice", "purchase-blocked", 100).await, Err(RetailError::AccountRestricted(client)) if client == "Alicja")
+        );
+        assert!(
+            matches!(service.transfer("bob", "alice", "incoming-blocked", 100_000, "private_transfer").await, Err(RetailError::AccountRestricted(client)) if client == "Alicja")
+        );
+        assert_eq!(store.account("alice").unwrap().available_raw, "0");
+        assert_eq!(store.fee_position().unwrap().pending_raw, "0");
+    }
+
+    #[tokio::test]
+    async fn wind_down_blocks_purchase_without_changing_inventory_or_client_balance() {
+        let store = Arc::new(SqliteRetailStore::open(":memory:").unwrap());
+        store.activate_inventory(10_000_000).unwrap();
+        let service = RetailService::new(
+            store.clone(),
+            Arc::new(Issuer(AtomicUsize::new(0))),
+            Address::with_last_byte(2),
+            "0x1".into(),
+            31337,
+            Arc::new(ReconciliationService::new(
+                Arc::new(SqliteReconciliationStore::open(":memory:").unwrap()),
+                store.clone(),
+                Arc::new(Wallet {
+                    hot: 2_000_000,
+                    cold: 8_000_000,
+                }),
+                Address::with_last_byte(1),
+                Address::with_last_byte(2),
+                Address::with_last_byte(3),
+            )),
+        )
+        .with_token_state(Arc::new(TokenState("wind_down")));
+
+        assert!(matches!(
+            service.purchase("alice", "wind-down-purchase", 100).await,
+            Err(RetailError::TokenWindDown)
+        ));
+        let account = store.account("alice").unwrap();
+        assert_eq!(account.available_raw, "0");
+        assert_eq!(account.inventory_available_raw, "10000000");
     }
 }

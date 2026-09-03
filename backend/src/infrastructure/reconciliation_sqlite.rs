@@ -52,7 +52,9 @@ fn status(value: ReconciliationStatus) -> &'static str {
     match value {
         ReconciliationStatus::Balanced => "balanced",
         ReconciliationStatus::Warning => "warning",
-        ReconciliationStatus::Blocked => "blocked",
+        // Keep the legacy SQLite value to remain compatible with the original
+        // CHECK constraint. The API/domain name is deliberately non-blocking.
+        ReconciliationStatus::Mismatch => "blocked",
         ReconciliationStatus::Unavailable => "unavailable",
     }
 }
@@ -60,7 +62,7 @@ fn parse_status(value: &str) -> ReconciliationStatus {
     match value {
         "balanced" => ReconciliationStatus::Balanced,
         "warning" => ReconciliationStatus::Warning,
-        "blocked" => ReconciliationStatus::Blocked,
+        "mismatch" | "blocked" => ReconciliationStatus::Mismatch,
         _ => ReconciliationStatus::Unavailable,
     }
 }

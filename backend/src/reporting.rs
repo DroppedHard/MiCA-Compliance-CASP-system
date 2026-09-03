@@ -11,6 +11,9 @@ pub struct ReportingEvent {
     pub operation_id: String,
     pub classification: String,
     pub value_raw: u64,
+    /// Exact fiat value captured by an exchange order. Transfers that do not
+    /// exchange fiat leave this empty and are valued from token quantity.
+    pub value_usd_minor: Option<u64>,
     pub fee_raw: u64,
     pub known_onchain_overlap: bool,
 }
@@ -100,6 +103,7 @@ fn aggregate_day(
 ) -> Result<DailyTransactionAggregate, ReportingError> {
     use std::collections::BTreeMap;
     let mut total_value = 0_u64;
+    let mut total_value_usd_minor = 0_u64;
     let mut means_count = 0_u64;
     let mut means_value = 0_u64;
     let mut overlap_count = 0_u64;
@@ -107,6 +111,12 @@ fn aggregate_day(
     let mut classes: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for event in &events {
         total_value = checked_add(total_value, event.value_raw)?;
+        total_value_usd_minor = checked_add(
+            total_value_usd_minor,
+            event
+                .value_usd_minor
+                .unwrap_or_else(|| raw_to_minor_rounded(event.value_raw)),
+        )?;
         let entry = classes.entry(event.classification.clone()).or_default();
         entry.0 = checked_add(entry.0, 1)?;
         entry.1 = checked_add(entry.1, event.value_raw)?;
@@ -142,11 +152,11 @@ fn aggregate_day(
         currency_area: "USD".into(),
         total_operation_count: total_count,
         total_value_raw: total_value.to_string(),
-        total_value_usd_minor: raw_to_minor(total_value)?.to_string(),
+        total_value_usd_minor: total_value_usd_minor.to_string(),
         means_of_exchange_count: means_count,
         means_of_exchange_value_raw: means_value.to_string(),
-        means_of_exchange_value_usd_minor: raw_to_minor(means_value)?.to_string(),
-        means_of_exchange_value_eur_minor: raw_to_minor(means_value)?.to_string(),
+        means_of_exchange_value_usd_minor: raw_to_minor_rounded(means_value).to_string(),
+        means_of_exchange_value_eur_minor: raw_to_minor_rounded(means_value).to_string(),
         excluded_operation_count: total_count - means_count,
         known_onchain_overlap_count: overlap_count,
         known_onchain_overlap_value_raw: overlap_value.to_string(),
@@ -166,11 +176,11 @@ const ALL_CLASSIFICATIONS: [&str; 7] = [
     "unknown",
 ];
 
-fn raw_to_minor(raw: u64) -> Result<u64, ReportingError> {
-    if !raw.is_multiple_of(10_000) {
-        return Err(ReportingError::InvalidAmount);
-    }
-    Ok(raw / 10_000)
+fn raw_to_minor_rounded(raw: u64) -> u64 {
+    // rUSD has six decimals while USD reporting uses two. Half-up rounding is
+    // only a presentation/aggregation rule; the ledger retains the exact raw
+    // token quantity and exchange orders retain their exact fiat amount.
+    raw.saturating_add(5_000) / 10_000
 }
 
 fn checked_add(left: u64, right: u64) -> Result<u64, ReportingError> {
@@ -217,8 +227,6 @@ pub(crate) fn validate_date(value: &str) -> Result<(), ReportingError> {
 pub enum ReportingError {
     #[error("from/to must form an ordered YYYY-MM-DD UTC date range")]
     InvalidDateRange,
-    #[error("reporting values must represent whole USD cents")]
-    InvalidAmount,
     #[error("daily reporting arithmetic overflow")]
     Overflow,
     #[error("daily reporting persistence failed: {0}")]
@@ -244,6 +252,7 @@ mod tests {
                 operation_id: "purchase".into(),
                 classification: "exchange_for_funds".into(),
                 value_raw: 10_000_000,
+                value_usd_minor: Some(1_000),
                 fee_raw: 0,
                 known_onchain_overlap: false,
             },
@@ -252,6 +261,7 @@ mod tests {
                 operation_id: "goods".into(),
                 classification: "goods_or_services".into(),
                 value_raw: 5_000_000,
+                value_usd_minor: None,
                 fee_raw: 5_000,
                 known_onchain_overlap: false,
             },
@@ -260,6 +270,7 @@ mod tests {
                 operation_id: "redemption".into(),
                 classification: "exchange_for_funds".into(),
                 value_raw: 2_000_000,
+                value_usd_minor: Some(200),
                 fee_raw: 0,
                 known_onchain_overlap: true,
             },

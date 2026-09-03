@@ -123,7 +123,7 @@ impl BootstrapService {
             BootstrapStatus::Created | BootstrapStatus::Failed
         ) {
             self.issuer
-                .create_order(&operation.operation_id, self.corporate, PURCHASE_USD_MINOR)
+                .create_order(&operation.operation_id, self.hot, PURCHASE_USD_MINOR)
                 .await?;
             *operation =
                 self.store
@@ -147,16 +147,18 @@ impl BootstrapService {
             )?;
         }
         if operation.status == BootstrapStatus::TokensIssued {
+            // Issuer mints the custody pool directly to the hot wallet. The only
+            // subsequent distribution transaction is hot -> cold; customer assets
+            // never pass through the CASP corporate wallet.
             let cold_hash = self
                 .wallet
                 .ensure_balance(self.cold, COLD_TARGET_RAW)
                 .await?;
-            let hot_hash = self.wallet.ensure_balance(self.hot, HOT_TARGET_RAW).await?;
             *operation = self.store.advance(
                 BootstrapStatus::Distributed,
                 None,
                 cold_hash.as_deref(),
-                hot_hash.as_deref(),
+                None,
             )?;
             let balances = self.balances().await?;
             // Corporate funds earned or acquired outside this bootstrap are valid.
@@ -179,6 +181,8 @@ pub enum BootstrapError {
     Storage(String),
     #[error("issuer request failed: {0}")]
     Issuer(String),
+    #[error("Emisja rUSD jest obecnie zablokowana przez emitenta.")]
+    IssuanceBlocked,
     #[error("bank transfer failed: {0}")]
     Bank(String),
     #[error("wallet operation failed: {0}")]
@@ -253,15 +257,22 @@ mod tests {
             Ok(())
         }
     }
-    struct Issuer(Mutex<u8>);
+    struct Issuer(Mutex<(u8, Option<Address>)>);
     #[async_trait]
     impl IssuerGateway for Issuer {
-        async fn create_order(&self, _: &str, _: Address, _: u64) -> Result<(), BootstrapError> {
-            *self.0.lock().unwrap() += 1;
+        async fn create_order(
+            &self,
+            _: &str,
+            recipient: Address,
+            _: u64,
+        ) -> Result<(), BootstrapError> {
+            let mut calls = self.0.lock().unwrap();
+            calls.0 += 1;
+            calls.1 = Some(recipient);
             Ok(())
         }
         async fn settle_order(&self, _: &str) -> Result<IssuerOrder, BootstrapError> {
-            *self.0.lock().unwrap() += 1;
+            self.0.lock().unwrap().0 += 1;
             Ok(IssuerOrder {
                 transaction_hash: Some("0xissuer".into()),
             })
@@ -285,11 +296,12 @@ mod tests {
         ) -> Result<Option<String>, BootstrapError> {
             let mut b = self.0.lock().unwrap();
             if d == Address::with_last_byte(3) {
-                b.2 = t
+                let moved = t - b.2;
+                b.2 = t;
+                b.1 -= moved;
             } else {
                 b.1 = t
             }
-            b.0 = PURCHASE_TOKEN_RAW - b.1 - b.2;
             Ok(Some("0xtransfer".into()))
         }
         async fn balances(
@@ -310,9 +322,9 @@ mod tests {
     #[tokio::test]
     async fn executes_complete_purchase_and_distribution_only_once() {
         let store = Arc::new(Store(Mutex::new(None)));
-        let issuer = Arc::new(Issuer(Mutex::new(0)));
+        let issuer = Arc::new(Issuer(Mutex::new((0, None))));
         let bank = Arc::new(Bank(Mutex::new(0)));
-        let wallet = Arc::new(Wallet(Mutex::new((PURCHASE_TOKEN_RAW, 0, 0))));
+        let wallet = Arc::new(Wallet(Mutex::new((0, PURCHASE_TOKEN_RAW, 0))));
         let service = BootstrapService::new(
             store,
             issuer.clone(),
@@ -330,7 +342,9 @@ mod tests {
             service.execute().await.unwrap().status,
             BootstrapStatus::Distributed
         );
-        assert_eq!(*issuer.0.lock().unwrap(), 2);
+        let issuer_calls = issuer.0.lock().unwrap();
+        assert_eq!(issuer_calls.0, 2);
+        assert_eq!(issuer_calls.1, Some(Address::with_last_byte(2)));
         assert_eq!(*bank.0.lock().unwrap(), 1);
     }
 }

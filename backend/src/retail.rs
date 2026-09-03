@@ -93,3 +93,11 @@ pub struct InternalTransfer {
 pub struct FeePosition {
     pub pending_raw: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeRate {
+    pub usd_minor_per_rusd: u64,
+    pub updated_at_unix_ms: u64,
+    pub methodology: String,
+}

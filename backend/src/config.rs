@@ -15,10 +15,12 @@ pub struct Config {
     pub deposit_confirmations: u64,
     pub corporate_private_key: String,
     pub hot_private_key: String,
+    pub cold_private_key: String,
     pub corporate_address: Address,
     pub hot_address: Address,
     pub cold_address: Address,
     pub chain_id: u64,
+    pub seed_reporting_demo_on_startup: bool,
 }
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -55,6 +57,7 @@ impl Config {
                 .map_err(|_| ConfigError::ChainId)?,
             corporate_private_key: required("CASP_CORPORATE_PRIVATE_KEY")?,
             hot_private_key: required("CASP_HOT_PRIVATE_KEY")?,
+            cold_private_key: required("CASP_COLD_PRIVATE_KEY")?,
             corporate_address: address("CASP_CORPORATE_ADDRESS")?,
             hot_address: address("CASP_HOT_ADDRESS")?,
             cold_address: address("CASP_COLD_ADDRESS")?,
@@ -62,6 +65,8 @@ impl Config {
                 .unwrap_or_else(|_| "31337".to_owned())
                 .parse()
                 .map_err(|_| ConfigError::ChainId)?,
+            seed_reporting_demo_on_startup: env::var("SEED_CASP_REPORTING_DEMO_ON_STARTUP")
+                .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
         })
     }
 }

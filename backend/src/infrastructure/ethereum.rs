@@ -1,7 +1,9 @@
 use crate::{
     application::{BootstrapError, WalletGateway},
     domain::WalletBalances,
+    external_withdrawals::{ExternalWithdrawalError, ExternalWithdrawalGateway},
     fee_sweep::{FeeSweepError, FeeSweepGateway},
+    inventory::{CustodyTransferGateway, InventoryError},
 };
 use alloy::{
     primitives::{Address, U256},
@@ -15,6 +17,34 @@ pub struct AlloyWalletGateway {
     provider: DynProvider,
     token: Address,
     signer_address: Address,
+}
+#[async_trait]
+impl ExternalWithdrawalGateway for AlloyWalletGateway {
+    async fn transfer(
+        &self,
+        destination: Address,
+        amount_raw: u64,
+    ) -> Result<String, ExternalWithdrawalError> {
+        let amount = U256::from(amount_raw);
+        if self
+            .balance(self.signer_address)
+            .await
+            .map_err(|e| ExternalWithdrawalError::Wallet(e.to_string()))?
+            < amount
+        {
+            return Err(ExternalWithdrawalError::InsufficientHotWalletBalance);
+        }
+        let pending = Token::new(self.token, &self.provider)
+            .transfer(destination, amount)
+            .send()
+            .await
+            .map_err(|e| ExternalWithdrawalError::Wallet(e.to_string()))?;
+        let receipt = pending
+            .get_receipt()
+            .await
+            .map_err(|e| ExternalWithdrawalError::Wallet(e.to_string()))?;
+        Ok(receipt.transaction_hash.to_string())
+    }
 }
 impl AlloyWalletGateway {
     pub async fn connect(
@@ -83,6 +113,30 @@ impl FeeSweepGateway for AlloyWalletGateway {
             .get_receipt()
             .await
             .map_err(|error| FeeSweepError::Wallet(error.to_string()))?;
+        Ok(receipt.transaction_hash.to_string())
+    }
+}
+#[async_trait]
+impl CustodyTransferGateway for AlloyWalletGateway {
+    async fn transfer_custody(
+        &self,
+        destination: Address,
+        amount_raw: u64,
+    ) -> Result<String, InventoryError> {
+        let amount = U256::from(amount_raw);
+        if self.balance(self.signer_address).await? < amount {
+            return Err(InventoryError::Invalid(
+                "source custody wallet does not contain enough rUSD".into(),
+            ));
+        }
+        let receipt = Token::new(self.token, &self.provider)
+            .transfer(destination, amount)
+            .send()
+            .await
+            .map_err(wallet)?
+            .get_receipt()
+            .await
+            .map_err(wallet)?;
         Ok(receipt.transaction_hash.to_string())
     }
 }

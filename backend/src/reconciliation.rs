@@ -12,7 +12,7 @@ pub const RECONCILIATION_POLICY_VERSION: &str = "casp-custody-reconciliation-v1"
 pub enum ReconciliationStatus {
     Balanced,
     Warning,
-    Blocked,
+    Mismatch,
     Unavailable,
 }
 
@@ -86,16 +86,6 @@ impl ReconciliationService {
         Ok(snapshot)
     }
 
-    pub async fn require_customer_purchase(&self) -> Result<(), ReconciliationError> {
-        let snapshot = self.check().await?;
-        match snapshot.status {
-            ReconciliationStatus::Balanced | ReconciliationStatus::Warning => Ok(()),
-            ReconciliationStatus::Blocked | ReconciliationStatus::Unavailable => {
-                Err(ReconciliationError::Blocked(snapshot.reason))
-            }
-        }
-    }
-
     pub async fn run(self, interval: Duration) {
         loop {
             match self.check().await {
@@ -164,7 +154,7 @@ pub fn evaluate(
     let difference = i128::from(custody) - i128::from(obligations);
     let (status, reason) = if difference != 0 {
         (
-            ReconciliationStatus::Blocked,
+            ReconciliationStatus::Mismatch,
             "hot and cold custody do not equal customer positions, locks, unallocated inventory and pending CASP fees",
         )
     } else if custody > 0 && u128::from(hot) * 100 != u128::from(custody) * 20 {
@@ -234,8 +224,6 @@ fn unix_ms() -> u64 {
 pub enum ReconciliationError {
     #[error("custody reconciliation is unavailable: {0}")]
     Unavailable(String),
-    #[error("CASP operation is blocked by custody reconciliation: {0}")]
-    Blocked(String),
     #[error("custody reconciliation persistence failed: {0}")]
     Storage(String),
 }
@@ -259,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_balanced_warning_and_blocked_without_counting_corporate() {
+    fn classifies_balanced_allocation_warning_and_non_blocking_mismatch() {
         assert_eq!(
             evaluate(&balances(2_000, 8_000), 3_000, 1_000, 6_000, 0)
                 .unwrap()
@@ -272,9 +260,9 @@ mod tests {
                 .status,
             ReconciliationStatus::Warning
         );
-        let blocked = evaluate(&balances(2_000, 7_999), 3_000, 1_000, 6_000, 0).unwrap();
-        assert_eq!(blocked.status, ReconciliationStatus::Blocked);
-        assert_eq!(blocked.difference_raw.as_deref(), Some("-1"));
+        let mismatch = evaluate(&balances(2_000, 7_999), 3_000, 1_000, 6_000, 0).unwrap();
+        assert_eq!(mismatch.status, ReconciliationStatus::Mismatch);
+        assert_eq!(mismatch.difference_raw.as_deref(), Some("-1"));
     }
 
     struct MutableWallet {
@@ -349,7 +337,7 @@ mod tests {
         let service = service(wallet.clone());
         assert_eq!(
             service.check().await.unwrap().status,
-            ReconciliationStatus::Blocked
+            ReconciliationStatus::Mismatch
         );
         wallet.cold.store(8_000_000, Ordering::SeqCst);
         assert_eq!(

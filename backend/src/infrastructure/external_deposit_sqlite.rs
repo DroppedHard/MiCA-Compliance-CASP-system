@@ -22,6 +22,8 @@ impl SqliteExternalDepositStore {
             include_str!("../../migrations/0006_extended_service_records.sql"),
             include_str!("../../migrations/0010_client_wallets.sql"),
             include_str!("../../migrations/0011_external_deposits.sql"),
+            include_str!("../../migrations/0012_address_blacklist.sql"),
+            include_str!("../../migrations/0016_client_account_restrictions.sql"),
         ] {
             connection.execute_batch(migration).map_err(storage)?;
         }
@@ -51,6 +53,31 @@ impl ExternalDepositStore for SqliteExternalDepositStore {
     ) -> Result<(), ExternalDepositError> {
         let mut connection = self.connection.lock().map_err(storage)?;
         let tx = connection.transaction().map_err(storage)?;
+        let sender_address = event.sender.to_checksum(None);
+        let destination_address = client_id
+            .map(|client| format!("rusd:casp:{client}"))
+            .unwrap_or_else(|| event.client_reference.to_string());
+        let address_blocked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM address_blacklist WHERE normalized_address IN (?1,?2))",
+            params![sender_address.to_ascii_lowercase(), destination_address.to_ascii_lowercase()],
+            |row| row.get(0),
+        ).map_err(storage)?;
+        let account_blocked: bool = match client_id {
+            Some(client) => tx.query_row("SELECT EXISTS(SELECT 1 FROM client_account_restrictions WHERE client_id=?1 AND active=1)", [client], |row| row.get(0)).map_err(storage)?,
+            None => false,
+        };
+        if address_blocked || account_blocked {
+            let reason = if account_blocked {
+                "konto klienta CASP jest zablokowane"
+            } else {
+                "adres źródłowy lub docelowy jest na czarnej liście"
+            };
+            tx.execute(
+                "INSERT OR IGNORE INTO blocked_transfer_attempts(attempt_id,transfer_kind,source_address,destination_address,transaction_reference,reason,created_at_unix_ms) VALUES(?1,'external_deposit',?2,?3,?4,?5,?6)",
+                params![format!("{}:{}:{}", chain_id, event.transaction_hash, event.log_index), sender_address, destination_address, event.transaction_hash, reason, now() as i64],
+            ).map_err(storage)?;
+            return tx.commit().map_err(storage);
+        }
         let inserted=tx.execute("INSERT OR IGNORE INTO external_deposits(chain_id,transaction_hash,log_index,block_number,sender_address,client_reference,client_id,amount_raw,status,credited_at_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![chain_id as i64,event.transaction_hash,event.log_index as i64,event.block_number as i64,event.sender.to_checksum(None),event.client_reference.to_string(),client_id,event.amount_raw as i64,if client_id.is_some(){"credited"}else{"unknown_reference"},client_id.map(|_|now() as i64)]).map_err(storage)?;
         if inserted == 1
             && let Some(client) = client_id
@@ -64,6 +91,17 @@ impl ExternalDepositStore for SqliteExternalDepositStore {
     }
     fn advance(&self, block: u64) -> Result<(), ExternalDepositError> {
         self.connection.lock().map_err(storage)?.execute("UPDATE external_deposit_checkpoint SET last_confirmed_block=max(last_confirmed_block,?1) WHERE singleton=1",[block as i64]).map_err(storage)?;
+        Ok(())
+    }
+    fn reset_checkpoint(&self) -> Result<(), ExternalDepositError> {
+        self.connection
+            .lock()
+            .map_err(storage)?
+            .execute(
+                "UPDATE external_deposit_checkpoint SET last_confirmed_block=0 WHERE singleton=1",
+                [],
+            )
+            .map_err(storage)?;
         Ok(())
     }
 }
@@ -122,5 +160,111 @@ mod tests {
         assert_eq!(alice, 25_000_000);
         assert_eq!(records, 1);
         assert_eq!(unknown_status, "unknown_reference");
+    }
+
+    #[test]
+    fn checkpoint_can_be_reset_after_a_disposable_chain_restart() {
+        let store = SqliteExternalDepositStore::open(":memory:").unwrap();
+        store.advance(120).unwrap();
+        assert_eq!(store.checkpoint().unwrap(), 120);
+
+        store.reset_checkpoint().unwrap();
+
+        assert_eq!(store.checkpoint().unwrap(), 0);
+    }
+
+    #[test]
+    fn blacklisted_external_sender_or_destination_is_audited_without_credit() {
+        let store = SqliteExternalDepositStore::open(":memory:").unwrap();
+        let sender = Address::with_last_byte(9)
+            .to_checksum(None)
+            .to_ascii_lowercase();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO address_blacklist VALUES(?1,?2,'test',1)",
+                params![sender, sender],
+            )
+            .unwrap();
+        store
+            .apply(
+                31337,
+                &event("0xblocked-sender", "rusd:casp:alice"),
+                Some("alice"),
+            )
+            .unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            let alice: i64 = connection
+                .query_row(
+                    "SELECT available_raw FROM client_positions WHERE client_id='alice'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let attempts: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM blocked_transfer_attempts",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(alice, 0);
+            assert_eq!(attempts, 1);
+            connection
+                .execute("DELETE FROM address_blacklist", [])
+                .unwrap();
+            connection.execute("INSERT INTO address_blacklist VALUES('rusd:casp:alice','rusd:casp:alice','test',2)", []).unwrap();
+        }
+        store
+            .apply(
+                31337,
+                &event("0xblocked-target", "rusd:casp:alice"),
+                Some("alice"),
+            )
+            .unwrap();
+        let connection = store.connection.lock().unwrap();
+        let alice: i64 = connection
+            .query_row(
+                "SELECT available_raw FROM client_positions WHERE client_id='alice'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let attempts: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM blocked_transfer_attempts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alice, 0);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn deposit_for_restricted_client_is_audited_without_credit() {
+        let store = SqliteExternalDepositStore::open(":memory:").unwrap();
+        store.connection.lock().unwrap().execute("INSERT INTO client_account_restrictions(client_id,reason,active,updated_at_unix_ms) VALUES('alice','polecenie organu',1,1)", []).unwrap();
+        store
+            .apply(
+                31337,
+                &event("0xrestricted-account", "rusd:casp:alice"),
+                Some("alice"),
+            )
+            .unwrap();
+        let connection = store.connection.lock().unwrap();
+        let balance: i64 = connection
+            .query_row(
+                "SELECT available_raw FROM client_positions WHERE client_id='alice'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let attempts: i64 = connection.query_row("SELECT count(*) FROM blocked_transfer_attempts WHERE reason='konto klienta CASP jest zablokowane'", [], |row| row.get(0)).unwrap();
+        assert_eq!(balance, 0);
+        assert_eq!(attempts, 1);
     }
 }

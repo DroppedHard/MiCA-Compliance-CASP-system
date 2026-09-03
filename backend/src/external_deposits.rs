@@ -35,6 +35,7 @@ pub trait ExternalDepositStore: Send + Sync {
         client_id: Option<&str>,
     ) -> Result<(), ExternalDepositError>;
     fn advance(&self, block: u64) -> Result<(), ExternalDepositError>;
+    fn reset_checkpoint(&self) -> Result<(), ExternalDepositError>;
 }
 
 #[derive(Clone)]
@@ -61,8 +62,16 @@ impl ExternalDepositObserver {
     }
 
     pub async fn poll_once(&self) -> Result<(), ExternalDepositError> {
-        let from = self.store.checkpoint()?.saturating_add(1);
+        let checkpoint = self.store.checkpoint()?;
         let to = self.gateway.confirmed_block().await?;
+        // A persisted Compose volume may outlive the disposable Hardhat chain.
+        // A lower confirmed height therefore identifies a fresh local chain.
+        let from = if checkpoint > to {
+            self.store.reset_checkpoint()?;
+            1
+        } else {
+            checkpoint.saturating_add(1)
+        };
         if from > to {
             return Ok(());
         }

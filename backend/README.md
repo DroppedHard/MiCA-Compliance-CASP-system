@@ -4,7 +4,7 @@
 
 The backend persists custody evidence under policy `casp-custody-reconciliation-v1`. It compares on-chain hot and cold wallet balances with the sum of customer available positions, customer locked positions, unallocated inventory and CASP fees accrued but not yet swept on-chain. The corporate wallet is reported separately and never counted as coverage for client entitlements.
 
-Reconciliation runs immediately after the startup bootstrap, every five minutes, and before and after current purchase, sale, internal-transfer and redemption operations. New customer purchases fail closed when evidence is unavailable or totals differ. Sales and redemptions remain available because they do not create a new customer entitlement. Allocation drift away from the demo 20/80 target produces `warning` without claiming a custody shortfall.
+Reconciliation runs immediately after the startup bootstrap, every five minutes, and around current balance-changing operations. It is a diagnostic control: `mismatch` or `unavailable` raises an operator alert but does not automatically block customer purchases or internal ledger transfers. Allocation drift away from the demo 20/80 target produces `warning`. An external on-chain withdrawal has a separate hard liquidity gate and is rejected when the hot wallet cannot transfer the requested rUSD amount.
 
 Read the latest persisted snapshot:
 
@@ -20,19 +20,19 @@ The explicit bootstrap operation purchases `10,000 rUSD` from the issuer and end
 
 - cold client-custody wallet: `8,000 rUSD`;
 - hot client-custody wallet: `2,000 rUSD`;
-- corporate CASP wallet: no fixed absolute target; it may contain separate CASP-owned inventory or revenue.
+- corporate CASP wallet: no custody target; it contains only CASP-owned assets such as swept revenue.
 
-The corporate wallet is the CASP-private wallet discussed in the project model. The issuer first mints the full purchase to this wallet. The CASP then transfers 8,000 to cold custody and 2,000 to hot custody. No client positions are created yet.
+The issuer mints the full purchase directly to the hot custody wallet. CASP then executes a distinct hot-to-cold rebalancing transaction for 8,000 rUSD, leaving 2,000 rUSD hot. The corporate wallet is never an intermediate holder of customer-custody assets. No client positions are created yet.
 
 The workflow is an idempotent saga:
 
 ```text
 CASP persists operation_id
--> POST issuer issuance order for the corporate wallet
+-> POST issuer issuance order for the hot custody wallet
 -> POST matching USD deposit to mockBank
 -> POST issuer settlement request
--> issuer mints 10,000 rUSD to corporate
--> CASP moves 8,000 to cold and 2,000 to hot
+-> issuer mints 10,000 rUSD directly to hot custody
+-> CASP rebalances 8,000 from hot to cold
 -> CASP reconciles the 2,000 / 8,000 hot/cold bootstrap targets
 ```
 
@@ -42,7 +42,7 @@ This fixed target-balance technique is used only by the initial bootstrap. Later
 
 ## Configuration
 
-Use three different local Hardhat accounts. The corporate private key must correspond to `CASP_CORPORATE_ADDRESS` and needs local ETH for gas.
+Use three different local Hardhat accounts. The hot private key signs withdrawals, fee sweeps and hot-to-cold corrections. The cold private key is available only to the dedicated manual rebalancing service, whose cold-wallet destination is fixed to the hot wallet. It is not exposed as a general transfer facility.
 
 The service loads `.env` from this directory at startup. Existing shell environment variables take precedence. `.env` is gitignored, while `.env.example` contains the reproducible fresh-Hardhat template. This workspace already contains a ready local `.env` using accounts 1, 2 and 3.
 
@@ -50,10 +50,11 @@ The service loads `.env` from this directory at startup. Existing shell environm
 | --- | --- | --- | --- |
 | `TOKEN_ADDRESS` | yes | none | deployed `ResearchUsdEMT` |
 | `CASP_CORPORATE_PRIVATE_KEY` | yes | none | disposable local signer for the corporate wallet |
-| `CASP_HOT_PRIVATE_KEY` | yes | none | disposable local signer used only for custody-to-corporate fee sweeps |
+| `CASP_HOT_PRIVATE_KEY` | yes | none | disposable local signer for hot-to-cold allocation, withdrawals and fee sweeps |
+| `CASP_COLD_PRIVATE_KEY` | yes | none | disposable local signer used only for manual cold-to-hot rebalancing |
 | `CASP_DEPOSIT_ROUTER_ADDRESS` | yes | none | shared router emitting attributable external-deposit events |
 | `CASP_DEPOSIT_CONFIRMATIONS` | no | `2` | blocks required before crediting an external deposit |
-| `CASP_CORPORATE_ADDRESS` | yes | none | wallet receiving the issuer mint |
+| `CASP_CORPORATE_ADDRESS` | yes | none | CASP-owned wallet for swept revenue, excluded from customer custody |
 | `CASP_HOT_ADDRESS` | yes | none | target hot custody wallet |
 | `CASP_COLD_ADDRESS` | yes | none | target cold custody wallet |
 | `RPC_URL` | no | `http://127.0.0.1:8545` | local Ethereum JSON-RPC |
@@ -62,6 +63,7 @@ The service loads `.env` from this directory at startup. Existing shell environm
 | `MOCK_BANK_URL` | no | `http://127.0.0.1:3100` | issuer mockBank |
 | `CASP_HTTP_ADDRESS` | no | `127.0.0.1:3200` | CASP API listen address |
 | `CASP_DATABASE_PATH` | no | `data/casp.sqlite` | independent CASP SQLite database |
+| `SEED_CASP_REPORTING_DEMO_ON_STARTUP` | no | `false` | idempotently adds six previous UTC days of reporting-only demo events |
 
 ## Local tutorial
 
@@ -79,6 +81,8 @@ cargo run
 ```
 
 Never paste a real or funded private key into this demo.
+
+Compose enables `SEED_CASP_REPORTING_DEMO_ON_STARTUP=true`. On every fresh CASP database it creates a six-day reporting fixture relative to the current UTC date. Repeated startup against the same database does not duplicate rows. These records feed only the daily reporting projection: they do not alter customer positions, inventory, fees or on-chain custody. Set the variable to `false` when only observed operations should be reported.
 
 The customer token-information facade is available at `GET /api/v1/public/token-information`. It reads the issuer's token, asset-state and ESG APIs in parallel and returns their values with the issuer-owned white-paper URL. It does not access issuer storage or independently calculate those metrics.
 
@@ -123,6 +127,8 @@ Calling the POST endpoint again returns the existing completed operation and doe
 - `GET /api/v1/admin/bootstrap-inventory`
 - `GET /api/v1/admin/wallets`
 - `GET /api/v1/admin/reconciliation`
+- `GET /api/v1/admin/rebalancing-plan`
+- `POST /api/v1/admin/rebalancing` executes the calculated hot-to-cold or cold-to-hot correction; it is a demo-only manual action
 - `GET /api/v1/admin/fees`
 - `POST /api/v1/admin/fee-sweeps` with `{ "operationId": "unique-id" }` transfers all currently pending rUSD fees from hot custody to the corporate wallet. The operation requires `CASP_HOT_PRIVATE_KEY`, records the transaction hash, debits the pending fee ledger only after chain confirmation and re-runs custody reconciliation.
 - `GET /api/v1/reports/daily-transactions?from=YYYY-MM-DD&to=YYYY-MM-DD`
@@ -138,6 +144,17 @@ Retail request bodies contain a caller-generated `operationId`. Reusing it with 
 
 Customer purchase and sale are CASP-internal SQLite postings. They move value between the unallocated-inventory position and the selected customer's position, while the total rUSD held in CASP hot/cold custody wallets remains unchanged. They do not call Ethereum or the issuer. The separate `redemptions` endpoint represents redemption at the issuer and is intentionally not wired to the current buy/sell screen.
 
+### Address blacklist and customer-account restrictions
+
+The address blacklist and customer-account restriction are deliberately separate controls. The address blacklist blocks transfers involving one logical or Ethereum address. A customer-account restriction blocks every CASP-mediated operation for the selected client and prevents incoming internal or observed external transfers from being credited.
+
+The administrator UI exposes both controls. The equivalent API routes are:
+
+- `GET/POST /api/v1/admin/address-blacklist` and `DELETE /api/v1/admin/address-blacklist/{address}`;
+- `GET/POST /api/v1/admin/client-account-restrictions` and `DELETE /api/v1/admin/client-account-restrictions/{clientId}`.
+
+The POST body for an account restriction is `{"clientId":"alice","reason":"Supervisory instruction"}`. The disposable demo database starts with the unused public Hardhat address `0xa0Ee7A142d267C1f36714E4a8F75612F20a79720` on the address blacklist. This is a public address, not a private wallet key. Delete it through the administrator UI when an empty list is needed for a test.
+
 ## Manual inventory increase
 
 Automatic replenishment is intentionally disabled. An administrator can buy an additional pool through the CASP facade:
@@ -147,16 +164,16 @@ $body = @{ operationId = "inventory-demo-1"; amountUsdMinor = 100000 } | Convert
 Invoke-RestMethod -Method Post -ContentType "application/json" -Body $body http://127.0.0.1:3200/api/v1/admin/inventory-replenishments
 ```
 
-`100000` means USD 1,000.00. The operation reuses the issuer order and mockBank transfer, mints to the corporate wallet, then sends 80% to cold and 20% to hot custody. Its progress and transaction hashes are persisted. Repeating the same identifier and amount resumes safely; reusing the identifier with another amount is rejected.
+`100000` means USD 1,000.00. The operation reuses the issuer order and mockBank transfer, mints the complete amount directly to hot custody, then transfers 80% from hot to cold. Its progress and transaction hashes are persisted. Repeating the same identifier and amount resumes safely; reusing the identifier with another amount is rejected.
 
-Inspect operations and the advisory allocation plan with:
+Inspect operations and the current allocation plan with:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:3200/api/v1/admin/inventory-replenishments
 Invoke-RestMethod http://127.0.0.1:3200/api/v1/admin/rebalancing-plan
 ```
 
-The 20/80 rule and manual replenishment are demo CASP business policies, not requirements stated by MiCA. The calculator reports drift but does not sign corrective transfers out of hot or cold wallets.
+The 20/80 rule and manual replenishment are demo CASP business policies, not requirements stated by MiCA. Allocation drift is not a reserve shortfall and does not block customer activity. The administrator can inspect the plan and execute it with `POST /api/v1/admin/rebalancing`; the backend permits only the calculated movement between the configured hot and cold wallets. Automatic rebalancing with administrator authorization remains a production recommendation, not part of this demo.
 
 ## Extended service-record export
 
@@ -198,6 +215,10 @@ Invoke-RestMethod -Method Post -ContentType application/json -Body $body http://
 The sender is debited by the gross amount. The recipient receives 99.9%, while the 0.1% demo transaction fee is posted to `fee_position.pending_raw`. The three postings and the audit records share one SQLite transaction. No Ethereum transaction or gas fee is involved in the customer transfer. Until an administrator runs the on-chain fee sweep, pending fees remain included in hot/cold custody obligations.
 
 Each seeded customer has a stable logical receiving reference (`rusd:casp:alice`, `rusd:casp:bob`, `rusd:casp:carol`). Internal transfers may use it in `recipientClientId`. For an external deposit, the sender passes its `keccak256` to the shared `CaspDepositRouter`. After the configured confirmation depth, the observer credits the matching customer exactly once. These identifiers are public ledger aliases, not blockchain wallets or secret keys.
+
+The ready local script is run from `issuer/asset` as `npm.cmd run external-deposit -- alice 100`. It sends on-chain rUSD through the shared router to CASP hot custody while the emitted reference attributes the deposit to Alice's logical ledger account. The script uses direct test minting only to fund its external Hardhat sender; this bypass is explicitly outside the issuer workflow.
+
+The observer detects a disposable Hardhat restart when its persisted checkpoint is higher than the new chain's confirmed height. It resets only the observation cursor and scans the fresh chain from block 1; existing SQLite operation records remain immutable and duplicate event identities remain idempotent.
 
 The daily-report endpoint projects immutable retail orders and internal transfers without deleting or rewriting the source records. It returns total activity separately from the `goods_or_services` subset used as the demo estimate of use as a means of exchange. Fiat purchase, sale and redemption activity is classified as `exchange_for_funds` and excluded from that subset. The payload also identifies known on-chain overlap, methodology versions and the explicit demo USD/EUR 1:1 conversion.
 

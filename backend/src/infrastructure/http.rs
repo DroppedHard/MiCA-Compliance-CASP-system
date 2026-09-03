@@ -1,6 +1,8 @@
 use crate::application::{BankGateway, BootstrapError, IssuerGateway, IssuerOrder};
 use crate::public_info::{IssuerPublicGateway, PublicInfoError, TokenInformation};
-use crate::retail_application::{IssuerRedemption, RetailError, RetailIssuerGateway};
+use crate::retail_application::{
+    IssuerRedemption, RetailError, RetailIssuerGateway, RetailTokenState,
+};
 use alloy::primitives::Address;
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -29,6 +31,13 @@ struct CreateOrder<'a> {
 #[serde(rename_all = "camelCase")]
 struct OrderResponse {
     transaction_hash: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssuerErrorResponse {
+    code: Option<String>,
+    error: Option<String>,
+    user_message: Option<String>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,20 +69,60 @@ impl IssuerGateway for HttpIssuerGateway {
         Ok(())
     }
     async fn settle_order(&self, id: &str) -> Result<IssuerOrder, BootstrapError> {
-        let value = self
+        let response = self
             .client
             .post(format!("{}/api/v1/issuance-orders/{id}/settle", self.base))
             .send()
             .await
-            .map_err(issuer)?
-            .error_for_status()
-            .map_err(issuer)?
-            .json::<OrderResponse>()
-            .await
             .map_err(issuer)?;
+        if !response.status().is_success() {
+            return Err(decode_issuer_error(response).await);
+        }
+        let value = response.json::<OrderResponse>().await.map_err(issuer)?;
         Ok(IssuerOrder {
             transaction_hash: value.transaction_hash,
         })
+    }
+}
+
+async fn decode_issuer_error(response: reqwest::Response) -> BootstrapError {
+    let status = response.status();
+    issuer_error(status, response.json::<IssuerErrorResponse>().await.ok())
+}
+
+fn issuer_error(status: StatusCode, body: Option<IssuerErrorResponse>) -> BootstrapError {
+    match body {
+        Some(body) if body.code.as_deref() == Some("issuance_blocked") => {
+            BootstrapError::IssuanceBlocked
+        }
+        Some(body) => BootstrapError::Issuer(
+            body.user_message
+                .or(body.error)
+                .unwrap_or_else(|| format!("emitent zwrócił HTTP {status}")),
+        ),
+        None => BootstrapError::Issuer(format!("emitent zwrócił HTTP {status}")),
+    }
+}
+
+#[cfg(test)]
+mod issuer_error_tests {
+    use super::*;
+
+    #[test]
+    fn maps_issuer_block_code_without_leaking_a_generic_http_error() {
+        let error = issuer_error(
+            StatusCode::CONFLICT,
+            Some(IssuerErrorResponse {
+                code: Some("issuance_blocked".into()),
+                error: Some("technical reason".into()),
+                user_message: Some("Emisja rUSD jest obecnie zablokowana przez emitenta.".into()),
+            }),
+        );
+        assert!(matches!(error, BootstrapError::IssuanceBlocked));
+        assert_eq!(
+            error.to_string(),
+            "Emisja rUSD jest obecnie zablokowana przez emitenta."
+        );
     }
 }
 
@@ -117,6 +166,29 @@ impl RetailIssuerGateway for HttpIssuerGateway {
         Ok(IssuerRedemption {
             transaction_hash: value.transaction_hash,
         })
+    }
+}
+
+#[async_trait]
+impl RetailTokenState for HttpIssuerGateway {
+    async fn current_state(&self) -> Result<String, RetailError> {
+        let response = self
+            .client
+            .get(format!("{}/api/v1/asset-state", self.base))
+            .send()
+            .await
+            .map_err(retail_issuer)?
+            .error_for_status()
+            .map_err(retail_issuer)?;
+        #[derive(Deserialize)]
+        struct StateResponse {
+            state: String,
+        }
+        response
+            .json::<StateResponse>()
+            .await
+            .map(|value| value.state)
+            .map_err(retail_issuer)
     }
 }
 
@@ -218,6 +290,12 @@ struct PublicAssetState {
 struct PublicEsgObservation {
     observed_at_unix_ms: u64,
     methodology: PublicEsgMethodology,
+    current_day: PublicEsgEstimate,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicEsgEstimate {
+    energy_best_guess_wh: f64,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -261,6 +339,15 @@ fn compose_information(
         name: token.snapshot.name,
         reference_currency: "USD".into(),
         parity_statement: "Demonstration assumption: 1 rUSD = 1 USD".into(),
+        issuer_name: "Demonstracyjny emitent rUSD".into(),
+        issuer_website: public_base.to_owned(),
+        issuer_contact_email: "emitent-rusd@example.invalid".into(),
+        offeror_name: "Demonstracyjny CASP rUSD".into(),
+        redemption_statement: "Posiadacz może zażądać od emitenta wykupu w każdym czasie po wartości nominalnej 1 rUSD = 1 USD.".into(),
+        redemption_fee_statement: "Emitent nie pobiera opłaty za wykup rUSD.".into(),
+        interest_statement: "rUSD nie zapewnia odsetek ani korzyści zależnych od okresu posiadania.".into(),
+        investor_protection_warning: "rUSD nie jest objęty systemem rekompensat dla inwestorów.".into(),
+        deposit_guarantee_warning: "rUSD nie jest objęty systemem gwarancji depozytów.".into(),
         contract_address: token.snapshot.contract_address,
         chain_id: token.snapshot.chain_id,
         decimals: token.snapshot.decimals,
@@ -272,6 +359,7 @@ fn compose_information(
         esg_source_name: esg.methodology.source_name,
         esg_source_url: esg.methodology.source_url,
         esg_note: esg.methodology.note,
+        estimated_energy_wh: esg.current_day.energy_best_guess_wh,
         white_paper_url: format!("{public_base}/white-paper"),
         issuer_observed_at_unix_ms: token
             .observed_at_unix_ms
@@ -323,6 +411,9 @@ mod public_info_tests {
             },
             PublicEsgObservation {
                 observed_at_unix_ms: 11,
+                current_day: PublicEsgEstimate {
+                    energy_best_guess_wh: 142.5,
+                },
                 methodology: PublicEsgMethodology {
                     version: "esg-v1".into(),
                     source_name: "Cambridge".into(),
@@ -337,5 +428,6 @@ mod public_info_tests {
         assert_eq!(info.reserve_coverage_percent, Some(104.0));
         assert_eq!(info.issuer_observed_at_unix_ms, 12);
         assert_eq!(info.white_paper_url, "http://issuer-ui/white-paper");
+        assert_eq!(info.estimated_energy_wh, 142.5);
     }
 }

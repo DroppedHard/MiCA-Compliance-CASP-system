@@ -5,6 +5,7 @@ use crate::{
     retail_application::RetailStore,
 };
 use alloy::primitives::Address;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -130,7 +131,7 @@ impl InventoryService {
         let amount_minor = parse(&operation.amount_usd_minor)?;
         if operation.status == InventoryStatus::Created {
             self.issuer
-                .create_order(&operation.operation_id, self.corporate, amount_minor)
+                .create_order(&operation.operation_id, self.hot, amount_minor)
                 .await?;
             *operation = self.store.advance(
                 &operation.operation_id,
@@ -167,9 +168,15 @@ impl InventoryService {
                 .wallet
                 .balances(self.corporate, self.hot, self.cold)
                 .await?;
+            // The complete purchase is already on the hot custody wallet. Record
+            // the post-rebalance targets; only the 80% cold share must move on-chain.
             let hot_target = parse(&balances.hot_raw)?
-                .checked_add(parse(&operation.hot_increment_raw)?)
-                .ok_or(InventoryError::Overflow)?;
+                .checked_sub(parse(&operation.cold_increment_raw)?)
+                .ok_or_else(|| {
+                    InventoryError::Reconciliation(
+                        "hot wallet did not receive the issuer mint".into(),
+                    )
+                })?;
             let cold_target = parse(&balances.cold_raw)?
                 .checked_add(parse(&operation.cold_increment_raw)?)
                 .ok_or(InventoryError::Overflow)?;
@@ -192,10 +199,11 @@ impl InventoryService {
                 hash.as_deref(),
                 None,
             )?;
-            self.reconciliation.check().await?;
         }
         if operation.status == InventoryStatus::ColdDistributed {
             let target = required(&operation.hot_target_raw)?;
+            // This is normally a no-op: hot reached its target when it transferred
+            // the cold allocation. Keeping the check makes retries deterministic.
             let hash = self.wallet.ensure_balance(self.hot, target).await?;
             self.ledger.add_inventory_once(
                 &operation.operation_id,
@@ -230,8 +238,25 @@ pub struct RebalancingPlan {
     pub cold_delta_raw: i128,
     pub target_hot_raw: String,
     pub target_cold_raw: String,
-    pub executable_from_corporate_only: bool,
     pub policy_version: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebalancingResult {
+    pub direction: &'static str,
+    pub amount_raw: String,
+    pub transaction_hash: Option<String>,
+    pub resulting_plan: RebalancingPlan,
+}
+
+#[async_trait]
+pub trait CustodyTransferGateway: Send + Sync {
+    async fn transfer_custody(
+        &self,
+        destination: Address,
+        amount_raw: u64,
+    ) -> Result<String, InventoryError>;
 }
 
 pub fn rebalancing_plan(balances: &WalletBalances) -> Result<RebalancingPlan, InventoryError> {
@@ -247,9 +272,89 @@ pub fn rebalancing_plan(balances: &WalletBalances) -> Result<RebalancingPlan, In
         cold_delta_raw: cold_delta,
         target_hot_raw: target_hot.to_string(),
         target_cold_raw: target_cold.to_string(),
-        executable_from_corporate_only: hot_delta >= 0 && cold_delta >= 0,
         policy_version: POLICY_VERSION,
     })
+}
+
+pub async fn execute_rebalancing(
+    balances: &WalletBalances,
+    hot_gateway: &dyn CustodyTransferGateway,
+    cold_gateway: &dyn CustodyTransferGateway,
+    hot: Address,
+    cold: Address,
+) -> Result<RebalancingResult, InventoryError> {
+    let plan = rebalancing_plan(balances)?;
+    let (direction, amount, transaction_hash) = if plan.cold_delta_raw > 0 {
+        let amount = u64::try_from(plan.cold_delta_raw).map_err(|_| InventoryError::Overflow)?;
+        let hash = hot_gateway.transfer_custody(cold, amount).await?;
+        ("hot_to_cold", amount, Some(hash))
+    } else if plan.hot_delta_raw > 0 {
+        let amount = u64::try_from(plan.hot_delta_raw).map_err(|_| InventoryError::Overflow)?;
+        let hash = cold_gateway.transfer_custody(hot, amount).await?;
+        ("cold_to_hot", amount, Some(hash))
+    } else {
+        ("none", 0, None)
+    };
+    Ok(RebalancingResult {
+        direction,
+        amount_raw: amount.to_string(),
+        transaction_hash,
+        resulting_plan: plan,
+    })
+}
+
+#[derive(Clone)]
+pub struct RebalancingService {
+    wallet: Arc<dyn WalletGateway>,
+    hot_gateway: Arc<dyn CustodyTransferGateway>,
+    cold_gateway: Arc<dyn CustodyTransferGateway>,
+    reconciliation: Arc<ReconciliationService>,
+    corporate: Address,
+    hot: Address,
+    cold: Address,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl RebalancingService {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        wallet: Arc<dyn WalletGateway>,
+        hot_gateway: Arc<dyn CustodyTransferGateway>,
+        cold_gateway: Arc<dyn CustodyTransferGateway>,
+        reconciliation: Arc<ReconciliationService>,
+        corporate: Address,
+        hot: Address,
+        cold: Address,
+    ) -> Self {
+        Self {
+            wallet,
+            hot_gateway,
+            cold_gateway,
+            reconciliation,
+            corporate,
+            hot,
+            cold,
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    pub async fn execute(&self) -> Result<RebalancingResult, InventoryError> {
+        let _guard = self.lock.lock().await;
+        let balances = self
+            .wallet
+            .balances(self.corporate, self.hot, self.cold)
+            .await?;
+        let result = execute_rebalancing(
+            &balances,
+            self.hot_gateway.as_ref(),
+            self.cold_gateway.as_ref(),
+            self.hot,
+            self.cold,
+        )
+        .await?;
+        self.reconciliation.check().await?;
+        Ok(result)
+    }
 }
 
 fn parse(value: &str) -> Result<u64, InventoryError> {
@@ -296,6 +401,28 @@ impl From<crate::reconciliation::ReconciliationError> for InventoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingGateway {
+        transfers: Mutex<Vec<(Address, u64)>>,
+    }
+
+    #[async_trait]
+    impl CustodyTransferGateway for RecordingGateway {
+        async fn transfer_custody(
+            &self,
+            destination: Address,
+            amount_raw: u64,
+        ) -> Result<String, InventoryError> {
+            self.transfers
+                .lock()
+                .unwrap()
+                .push((destination, amount_raw));
+            Ok("0xtest".into())
+        }
+    }
+
     #[test]
     fn allocation_is_exact_20_80() {
         assert_eq!(
@@ -314,6 +441,84 @@ mod tests {
         let plan = rebalancing_plan(&balances).unwrap();
         assert_eq!(plan.hot_delta_raw, -100);
         assert_eq!(plan.cold_delta_raw, 100);
-        assert!(!plan.executable_from_corporate_only);
+    }
+
+    #[tokio::test]
+    async fn rebalancing_moves_excess_hot_balance_only_to_cold() {
+        let hot = Address::repeat_byte(1);
+        let cold = Address::repeat_byte(2);
+        let hot_gateway = RecordingGateway::default();
+        let cold_gateway = RecordingGateway::default();
+        let result = execute_rebalancing(
+            &WalletBalances {
+                corporate_raw: "0".into(),
+                hot_raw: "300".into(),
+                cold_raw: "700".into(),
+                evidence_block: Some(1),
+            },
+            &hot_gateway,
+            &cold_gateway,
+            hot,
+            cold,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.direction, "hot_to_cold");
+        assert_eq!(result.amount_raw, "100");
+        assert_eq!(*hot_gateway.transfers.lock().unwrap(), vec![(cold, 100)]);
+        assert!(cold_gateway.transfers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebalancing_moves_cold_balance_only_back_to_hot() {
+        let hot = Address::repeat_byte(1);
+        let cold = Address::repeat_byte(2);
+        let hot_gateway = RecordingGateway::default();
+        let cold_gateway = RecordingGateway::default();
+        let result = execute_rebalancing(
+            &WalletBalances {
+                corporate_raw: "0".into(),
+                hot_raw: "100".into(),
+                cold_raw: "900".into(),
+                evidence_block: Some(1),
+            },
+            &hot_gateway,
+            &cold_gateway,
+            hot,
+            cold,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.direction, "cold_to_hot");
+        assert_eq!(result.amount_raw, "100");
+        assert_eq!(*cold_gateway.transfers.lock().unwrap(), vec![(hot, 100)]);
+        assert!(hot_gateway.transfers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn balanced_wallets_do_not_submit_a_transaction() {
+        let hot_gateway = RecordingGateway::default();
+        let cold_gateway = RecordingGateway::default();
+        let result = execute_rebalancing(
+            &WalletBalances {
+                corporate_raw: "0".into(),
+                hot_raw: "200".into(),
+                cold_raw: "800".into(),
+                evidence_block: Some(1),
+            },
+            &hot_gateway,
+            &cold_gateway,
+            Address::repeat_byte(1),
+            Address::repeat_byte(2),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.direction, "none");
+        assert_eq!(result.transaction_hash, None);
+        assert!(hot_gateway.transfers.lock().unwrap().is_empty());
+        assert!(cold_gateway.transfers.lock().unwrap().is_empty());
     }
 }

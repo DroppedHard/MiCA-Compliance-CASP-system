@@ -22,7 +22,7 @@ Before the first retail purchase, initialize CASP inventory with the admin boots
 
 The administrator route polls the CASP backend every 10 seconds. It presents custody reconciliation, hot/cold/corporate wallet balances, customer liabilities, pending CASP fees, unallocated inventory, issuer bootstrap state, recent service records and the last seven days of transaction-reporting aggregates.
 
-The same route contains the demo-only manual inventory form. It lets an administrator choose a USD amount, follows the persisted issuer purchase operation and refreshes custody, inventory and the advisory 20/80 rebalancing plan after completion. Automatic inventory replenishment is not enabled.
+The same route contains the demo-only manual inventory form. It lets an administrator choose a USD amount and follows the persisted issuer purchase operation. It also presents the current 20/80 allocation plan and a manual button that executes the calculated hot-to-cold or cold-to-hot correction. Allocation drift is an operator warning, not an automatic transaction block. Automatic inventory replenishment and automatic rebalancing are not enabled.
 
 The customer purchase/sale area presents the issuer-published rUSD state, reserve coverage, contract identity and ESG methodology. It calls the CASP facade rather than the issuer directly and links to the issuer-owned `http://127.0.0.1:5173/white-paper` page.
 

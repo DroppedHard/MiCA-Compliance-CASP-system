@@ -42,12 +42,33 @@ Use `docker compose down` to stop the deployment or `docker compose down --volum
 
 On first startup the CASP buys 10,000 rUSD from the issuer. Issuance goes directly to hot custody, after which rebalancing moves 80% to cold custody. Customer purchases, sales, and internal transfers update SQLite entitlements without an on-chain transfer. External operations use the hot wallet.
 
+## API tests of the running CASP
+
+Create an isolated Python environment and install the repository manifest:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r .\scripts\lib.txt
+```
+
+No third-party package is currently required. Start the issuer and CASP Compose
+projects, then run:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run-p0-api-tests.py
+```
+
+The mutating suite covers representative CA-01--CA-06 flows and writes
+`test-results/api-p0-casp-*.json`. Unique operation IDs allow repeated local
+runs, while records remain visible for audit demonstrations. See
+[CASP P0 API scenarios](docs/en/p0-api-tests.md) for details.
+
 ## Verification and further documentation
 
 - [CASP backend and endpoints](docs/en/backend.md);
 - [customer and administrator frontend](docs/en/frontend.md);
 - [CASP documentation index](docs/en/README.md);
+- [CASP P0 API scenarios](docs/en/p0-api-tests.md);
 - [service-record model](docs/en/service-records.md).
 
 The basic verification set is `cargo test`, `cargo clippy`, `npm.cmd test`, and `npm.cmd run build`. Cross-institution system tests will be designed later. GitHub Actions are intentionally omitted.
-

@@ -34,6 +34,11 @@ struct OrderResponse {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RedemptionResponse {
+    burn_transaction_hash: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct IssuerErrorResponse {
     code: Option<String>,
     error: Option<String>,
@@ -160,11 +165,11 @@ impl RetailIssuerGateway for HttpIssuerGateway {
             .map_err(retail_issuer)?
             .error_for_status()
             .map_err(retail_issuer)?
-            .json::<OrderResponse>()
+            .json::<RedemptionResponse>()
             .await
             .map_err(retail_issuer)?;
         Ok(IssuerRedemption {
-            transaction_hash: value.transaction_hash,
+            transaction_hash: value.burn_transaction_hash,
         })
     }
 }
@@ -429,5 +434,18 @@ mod public_info_tests {
         assert_eq!(info.issuer_observed_at_unix_ms, 12);
         assert_eq!(info.white_paper_url, "http://issuer-ui/white-paper");
         assert_eq!(info.estimated_energy_wh, 142.5);
+    }
+}
+
+#[cfg(test)]
+mod response_contract_tests {
+    use super::*;
+
+    #[test]
+    fn redemption_reads_the_issuer_burn_transaction_hash() {
+        let response: RedemptionResponse =
+            serde_json::from_str(r#"{"burnTransactionHash":"0xburn"}"#).unwrap();
+
+        assert_eq!(response.burn_transaction_hash.as_deref(), Some("0xburn"));
     }
 }

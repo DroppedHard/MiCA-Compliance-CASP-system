@@ -87,6 +87,21 @@ impl ExternalWithdrawalStore for SqliteExternalWithdrawalStore {
         self.connection.lock().map_err(storage)?.execute("UPDATE external_withdrawals SET status='chain_confirmed',transaction_hash=?1,updated_at_unix_ms=?2 WHERE operation_id=?3 AND status='pending_chain'",params![hash,now() as i64,id]).map_err(storage)?;
         Ok(())
     }
+    fn mark_submission_uncertain(
+        &self,
+        id: &str,
+        message: &str,
+    ) -> Result<(), ExternalWithdrawalError> {
+        self.connection
+            .lock()
+            .map_err(storage)?
+            .execute(
+                "UPDATE external_withdrawals SET status='submission_uncertain',last_error=?1,updated_at_unix_ms=?2 WHERE operation_id=?3 AND status='pending_chain'",
+                params![message, now() as i64, id],
+            )
+            .map_err(storage)?;
+        Ok(())
+    }
     fn complete(
         &self,
         id: &str,

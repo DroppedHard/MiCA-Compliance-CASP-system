@@ -48,6 +48,25 @@ api_error!(
     }
 );
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::to_bytes, response::IntoResponse};
+
+    #[tokio::test]
+    async fn uncertain_external_withdrawal_maps_to_conflict_with_actionable_polish_message() {
+        let response = ExternalWithdrawalApiError(ExternalWithdrawalError::SubmissionUncertain(
+            "brak potwierdzenia z dostawcy RPC".into(),
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["error"].as_str().unwrap().contains("niejednoznaczny"));
+    }
+}
+
 api_error!(
     RetailApiError,
     RetailError,
@@ -92,7 +111,8 @@ api_error!(
         | ExternalWithdrawalError::AccountRestricted(_) => StatusCode::FORBIDDEN,
         ExternalWithdrawalError::IdempotencyConflict
         | ExternalWithdrawalError::InsufficientBalance
-        | ExternalWithdrawalError::InsufficientHotWalletBalance => StatusCode::CONFLICT,
+        | ExternalWithdrawalError::InsufficientHotWalletBalance
+        | ExternalWithdrawalError::SubmissionUncertain(_) => StatusCode::CONFLICT,
         ExternalWithdrawalError::Wallet(_) => StatusCode::BAD_GATEWAY,
         ExternalWithdrawalError::Reconciliation(_) => StatusCode::SERVICE_UNAVAILABLE,
         ExternalWithdrawalError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,

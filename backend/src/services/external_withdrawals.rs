@@ -38,6 +38,11 @@ pub trait ExternalWithdrawalStore: Send + Sync {
         fee: u64,
     ) -> Result<ExternalWithdrawal, ExternalWithdrawalError>;
     fn chain_confirmed(&self, operation: &str, hash: &str) -> Result<(), ExternalWithdrawalError>;
+    fn mark_submission_uncertain(
+        &self,
+        operation: &str,
+        message: &str,
+    ) -> Result<(), ExternalWithdrawalError>;
     fn complete(
         &self,
         operation: &str,
@@ -156,6 +161,13 @@ impl ExternalWithdrawalService {
                 .map_err(|error| ExternalWithdrawalError::Reconciliation(error.to_string()))?;
             return Ok(completed);
         }
+        if withdrawal.status == "submission_uncertain" {
+            return Err(ExternalWithdrawalError::SubmissionUncertain(
+                withdrawal
+                    .last_error
+                    .unwrap_or_else(|| "wymaga ręcznego potwierdzenia transakcji".into()),
+            ));
+        }
         if withdrawal.status != "pending_chain" {
             return Err(ExternalWithdrawalError::IdempotencyConflict);
         }
@@ -168,6 +180,11 @@ impl ExternalWithdrawalService {
                     .await
                     .map_err(|error| ExternalWithdrawalError::Reconciliation(error.to_string()))?;
                 Ok(completed)
+            }
+            Err(error @ ExternalWithdrawalError::SubmissionUncertain(_)) => {
+                self.store
+                    .mark_submission_uncertain(operation, &error.to_string())?;
+                Err(error)
             }
             Err(error) => {
                 self.store.fail(operation, &error.to_string())?;
@@ -195,6 +212,8 @@ pub enum ExternalWithdrawalError {
     Storage(String),
     #[error("hot-wallet transfer failed: {0}")]
     Wallet(String),
+    #[error("wynik wysłania transakcji z portfela gorącego jest niejednoznaczny: {0}")]
+    SubmissionUncertain(String),
     #[error("custody reconciliation failed: {0}")]
     Reconciliation(String),
 }

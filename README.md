@@ -49,11 +49,37 @@ Klucze z Compose należą do publicznych kont Hardhat i służą wyłącznie lok
 
 Przy pierwszym uruchomieniu CASP kupuje od emitenta 10 000 rUSD. Emisja trafia na portfel gorący, a rebalans przenosi 80% puli do portfela zimnego. Zakup, sprzedaż i przelew między klientami zmieniają prawa zapisane w SQLite i nie wykonują transakcji blockchainowej. Operacje zewnętrzne korzystają z portfela gorącego.
 
+## Testy API uruchomionego CASP
+
+Scenariusze P0 wymagają działającego emitenta, mockBanku, sieci Hardhat i
+backendu CASP. Środowisko Pythona można przygotować następująco:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r .\scripts\lib.txt
+```
+
+Runner korzysta obecnie wyłącznie z biblioteki standardowej, więc `lib.txt`
+jest stabilnym, pozbawionym zależności manifestem dla venv.
+
+Po uruchomieniu obu projektów Compose wykonaj:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run-p0-api-tests.py
+```
+
+Skrypt sprawdza przykłady CA-01–CA-06 i jest mutujący: pozostawia rekordy
+audytowe oraz niewielkie zmiany puli i sald. Używa unikalnych identyfikatorów,
+zwraca niezerowy kod przy błędzie i zapisuje raport w
+`test-results/api-p0-casp-*.json`. Szczegóły zawiera dokument
+[scenariuszy API P0 CASP](docs/pl/p0-api-tests.md).
+
 ## Weryfikacja i dalsza dokumentacja
 
 - [backend CASP i endpointy](docs/pl/backend.md);
 - [frontend klienta i administratora](docs/pl/frontend.md);
 - [indeks dokumentacji CASP](docs/pl/README.md);
 - [model rejestru operacji](docs/pl/service-records.md).
+- [scenariusze API P0 CASP](docs/pl/p0-api-tests.md).
 
 Podstawowa weryfikacja to `cargo test`, `cargo clippy`, `npm.cmd test` i `npm.cmd run build`. Testy całego przepływu dwóch instytucji zostaną dopasowane później. Repozytorium celowo nie zawiera GitHub Actions.
